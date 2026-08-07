@@ -1,0 +1,581 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""lc —— airgap-coder 的配置与运维 CLI。
+
+所有配置通过命令完成，不需要手改 yaml/toml：
+    lc init              交互式初始化
+    lc add               交互式添加一个模型上游
+    lc ls                列出上游
+    lc use <name>        切换默认上游
+    lc rm <name>         删除上游
+    lc up / down / status / logs
+    lc test [name]       协议层 5 项测试
+    lc e2e [name]        端到端测试（真改代码）
+    lc code [args...]    用当前上游启动 Codex
+    lc doctor            环境体检
+    lc sync              由注册表重新生成 litellm/codex 配置
+
+真实密钥只写入 .env（已 gitignore）；registry.json 只存非敏感信息，可以提交。
+"""
+from __future__ import print_function
+
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+REGISTRY = ROOT / "registry.json"
+ENVFILE = ROOT / ".env"
+LITELLM_CFG = ROOT / "litellm" / "config.yaml"
+CODEX_DIR = ROOT / "codex"
+GW_PORT_DEFAULT = 4000
+
+C = {"r": "\033[31m", "g": "\033[32m", "y": "\033[33m", "b": "\033[36m",
+     "d": "\033[2m", "x": "\033[0m", "B": "\033[1m"}
+if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+    C = dict((k, "") for k in C)
+
+
+def say(msg=""): print(msg)
+def ok(msg): say("%s✅%s %s" % (C["g"], C["x"], msg))
+def warn(msg): say("%s⚠️%s  %s" % (C["y"], C["x"], msg))
+def err(msg): say("%s❌%s %s" % (C["r"], C["x"], msg))
+def head(msg): say("\n%s%s%s" % (C["B"], msg, C["x"]))
+
+
+def die(msg, code=1):
+    err(msg)
+    sys.exit(code)
+
+
+# ---------------------------------------------------------------- registry
+
+DEFAULT_REGISTRY = {"default": None, "gateway_port": GW_PORT_DEFAULT, "upstreams": {}}
+
+
+def load_registry():
+    if not REGISTRY.exists():
+        return dict(DEFAULT_REGISTRY, upstreams={})
+    return json.loads(REGISTRY.read_text())
+
+
+def save_registry(reg):
+    REGISTRY.write_text(json.dumps(reg, indent=2, ensure_ascii=False) + "\n")
+
+
+# ---------------------------------------------------------------- .env
+
+def read_env():
+    d = {}
+    if ENVFILE.exists():
+        for line in ENVFILE.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                d[k.strip()] = v.strip()
+    return d
+
+
+def write_env(d):
+    lines = ["# 由 `lc` 生成/维护。此文件含密钥，已被 .gitignore 排除，切勿提交。", ""]
+    for k in sorted(d):
+        lines.append("%s=%s" % (k, d[k]))
+    ENVFILE.write_text("\n".join(lines) + "\n")
+    try:
+        os.chmod(str(ENVFILE), 0o600)
+    except OSError:
+        pass
+
+
+def env_key_name(name):
+    return "KEY_" + re.sub(r"[^A-Z0-9]", "_", name.upper())
+
+
+# ---------------------------------------------------------------- prompts
+
+def ask(label, default=None, secret=False, required=True):
+    suffix = ""
+    if default:
+        shown = default
+        if secret and len(default) > 8:
+            shown = default[:4] + "…" + default[-3:]
+        suffix = " %s[%s]%s" % (C["d"], shown, C["x"])
+    while True:
+        try:
+            v = input("%s%s%s%s: " % (C["b"], label, C["x"], suffix)).strip()
+        except (EOFError, KeyboardInterrupt):
+            say(); die("已取消", 130)
+        if not v and default is not None:
+            return default
+        if v or not required:
+            return v
+        warn("不能为空")
+
+
+def ask_bool(label, default=True):
+    d = "Y/n" if default else "y/N"
+    v = input("%s%s%s %s[%s]%s: " % (C["b"], label, C["x"], C["d"], d, C["x"])).strip().lower()
+    if not v:
+        return default
+    return v in ("y", "yes", "是")
+
+
+def ask_int(label, default):
+    while True:
+        v = ask(label, str(default))
+        try:
+            return int(v)
+        except ValueError:
+            warn("请输入数字")
+
+
+# ---------------------------------------------------------------- generate
+
+def gen_litellm(reg):
+    L = []
+    L.append("# 本文件由 `lc sync` 自动生成，请勿手改——改动会被覆盖。")
+    L.append("# 增删上游请用: lc add / lc rm / lc ls")
+    L.append("#")
+    L.append("# use_chat_completions_api: true 是关键开关。Codex >= 0.145 只说 Responses")
+    L.append("# 协议，而 vLLM 只提供 /v1/chat/completions。不加这个开关，LiteLLM 会把")
+    L.append("# /v1/responses 原样透传给上游，上游返回 404 / Unsupported model。")
+    L.append("")
+    L.append("model_list:")
+    for name in sorted(reg["upstreams"]):
+        u = reg["upstreams"][name]
+        L.append("  - model_name: %s" % name)
+        L.append("    litellm_params:")
+        L.append("      model: openai/%s" % u["model"])
+        L.append("      api_base: os.environ/%s" % (u["env_base"]))
+        L.append("      api_key: os.environ/%s" % (u["env_key"]))
+        L.append("      use_chat_completions_api: true")
+        if u.get("headers"):
+            L.append("      extra_headers:")
+            for k, v in sorted(u["headers"].items()):
+                L.append("        %s: \"%s\"" % (k, v))
+        # 额外参数扁平写进 litellm_params，LiteLLM 会原样转发给上游。
+        # 实测扁平写法与 extra_body 包一层都生效，扁平的对两种命名约定都适用。
+        if u.get("params"):
+            L.append(_yaml_block(u["params"], 6))
+        L.append("    model_info:")
+        L.append("      context_window: %d" % u["context_window"])
+        L.append("      max_output_tokens: %d" % u["max_output_tokens"])
+        L.append("")
+    L.append("litellm_settings:")
+    L.append("  drop_params: true")
+    L.append("  request_timeout: 600")
+    L.append("  num_retries: 2")
+    L.append("")
+    L.append("general_settings:")
+    L.append("  master_key: os.environ/LITELLM_MASTER_KEY")
+    LITELLM_CFG.parent.mkdir(exist_ok=True)
+    LITELLM_CFG.write_text("\n".join(L) + "\n")
+
+
+def _yaml_block(obj, indent):
+    out = []
+    pad = " " * indent
+    for k, v in sorted(obj.items()):
+        if isinstance(v, dict):
+            out.append("%s%s:" % (pad, k))
+            out.append(_yaml_block(v, indent + 2))
+        elif isinstance(v, bool):
+            out.append("%s%s: %s" % (pad, k, "true" if v else "false"))
+        elif isinstance(v, (int, float)):
+            out.append("%s%s: %s" % (pad, k, v))
+        else:
+            out.append("%s%s: \"%s\"" % (pad, k, v))
+    return "\n".join(out)
+
+
+def gen_codex(reg):
+    CODEX_DIR.mkdir(exist_ok=True)
+    port = reg.get("gateway_port", GW_PORT_DEFAULT)
+    default = reg.get("default") or (sorted(reg["upstreams"]) or [None])[0]
+    base = []
+    base.append("# 本文件由 `lc sync` 自动生成，请勿手改。")
+    base.append("# 通过 CODEX_HOME 指向本目录加载，不污染 ~/.codex")
+    base.append("")
+    base.append("model_provider = \"gateway\"")
+    if default:
+        base.append("model = \"%s\"" % default)
+    base.append("")
+    base.append("approval_policy = \"never\"")
+    base.append("sandbox_mode = \"workspace-write\"")
+    base.append("")
+    base.append("[model_providers.gateway]")
+    base.append("name = \"LiteLLM Gateway\"")
+    base.append("base_url = \"http://127.0.0.1:%d/v1\"" % port)
+    base.append("env_key = \"LITELLM_MASTER_KEY\"")
+    base.append("# Codex >= 0.145 移除了 wire_api=\"chat\"，只剩 responses。")
+    base.append("wire_api = \"responses\"")
+    (CODEX_DIR / "config.toml").write_text("\n".join(base) + "\n")
+
+    for f in CODEX_DIR.glob("*.config.toml"):
+        f.unlink()
+    for name in sorted(reg["upstreams"]):
+        u = reg["upstreams"][name]
+        (CODEX_DIR / ("%s.config.toml" % name)).write_text(
+            "# 由 `lc sync` 生成。profile: %s\n"
+            "model = \"%s\"\n"
+            "model_provider = \"gateway\"\n\n"
+            "# 上下文预算。注意：这不会消除 Codex 那句 \"Model metadata not found\"\n"
+            "# 警告（它来自 Codex 内置的模型注册表），但确实决定截断策略。\n"
+            "model_context_window = %d\n"
+            "model_max_output_tokens = %d\n\n"
+            "# 显式注册 apply_patch 工具。不开的话，模型自发调用它会报\n"
+            "# \"unsupported call: apply_patch\"，然后退化成用 shell heredoc 写文件——\n"
+            "# 既容易转义出错，也读不到结构化 diff。\n"
+            "include_apply_patch_tool = true\n\n"
+            "# 已在网关侧关闭思考模式，这里同步告知 Codex 不要索要 reasoning 元数据。\n"
+            "model_supports_reasoning_summaries = false\n"
+            % (name, name, u["context_window"], u["max_output_tokens"]))
+
+
+def sync(reg=None, quiet=False):
+    reg = reg or load_registry()
+    if not reg["upstreams"]:
+        die("还没有任何上游，先跑 `lc add`")
+    gen_litellm(reg)
+    gen_codex(reg)
+    if not quiet:
+        ok("已生成 litellm/config.yaml 与 codex/*.config.toml (%d 个上游)"
+           % len(reg["upstreams"]))
+
+
+# ---------------------------------------------------------------- docker
+
+def compose(*args, **kw):
+    return subprocess.call(["docker", "compose"] + list(args), cwd=str(ROOT), **kw)
+
+
+def gw_url(reg=None):
+    reg = reg or load_registry()
+    return "http://127.0.0.1:%d" % reg.get("gateway_port", GW_PORT_DEFAULT)
+
+
+def gw_alive(reg=None):
+    import urllib.request
+    try:
+        urllib.request.urlopen(gw_url(reg) + "/health/liveliness", timeout=5).read()
+        return True
+    except Exception:
+        return False
+
+
+def wait_gw(reg, tries=45):
+    import time
+    for i in range(tries):
+        if gw_alive(reg):
+            return i + 1
+        time.sleep(1)
+    return None
+
+
+# ---------------------------------------------------------------- commands
+
+def cmd_init(argv):
+    head("airgap-coder 初始化")
+    reg = load_registry()
+    env = read_env()
+
+    if not env.get("LITELLM_MASTER_KEY"):
+        import secrets
+        env["LITELLM_MASTER_KEY"] = "sk-lc-" + secrets.token_hex(16)
+        ok("已生成网关 master key")
+    reg["gateway_port"] = ask_int("网关端口", reg.get("gateway_port", GW_PORT_DEFAULT))
+    write_env(env)
+    save_registry(reg)
+
+    say()
+    say("接下来添加模型上游。内网 vLLM 直接填它的 /v1 地址。")
+    while True:
+        _add_one(reg, env)
+        if not ask_bool("再加一个上游?", False):
+            break
+    if not reg.get("default"):
+        reg["default"] = sorted(reg["upstreams"])[0]
+    save_registry(reg)
+    write_env(env)
+    sync(reg)
+    say()
+    ok("初始化完成。默认上游: %s" % reg["default"])
+    say("下一步: %slc up%s  然后  %slc test%s" % (C["B"], C["x"], C["B"], C["x"]))
+
+
+def _add_one(reg, env):
+    head("添加上游")
+    name = ask("名称（英文，用作 profile 名，如 intranet-32b）")
+    if name in reg["upstreams"] and not ask_bool("'%s' 已存在，覆盖?" % name, False):
+        return
+    base = ask("Base URL（到 /v1 为止，如 https://host:13207/member1/qwen3-32b/v1）")
+    base = base.rstrip("/")
+    if not base.endswith("/v1"):
+        warn("地址通常以 /v1 结尾，你填的是: %s" % base)
+    model = ask("上游模型 ID（发给后端的 model 字段，如 qwen3-32b）")
+    key = ask("API Key", secret=True)
+    ctx = ask_int("上下文窗口 (tokens)", 131072)
+    out = ask_int("最大输出 (tokens)", 16384)
+
+    say()
+    say("  后端类型决定关闭思考模式的参数名（两家约定不同）:")
+    say("    1) vLLM / SGLang     -> chat_template_kwargs.enable_thinking")
+    say("    2) 托管服务(百炼/Ark) -> 顶层 enable_thinking")
+    say("    3) 不设置")
+    kind = ask("选择", "1")
+    params = {}
+    if kind == "1":
+        params["chat_template_kwargs"] = {"enable_thinking": False}
+    elif kind == "2":
+        params["enable_thinking"] = False
+    if params:
+        say("  %s思考模式会输出 <think> 块，干扰 Codex 的 tool call 解析，建议关闭。%s"
+            % (C["d"], C["x"]))
+
+    headers = {}
+    if ask_bool("需要自定义 HTTP 头? (如 Kimi 要求 User-Agent)", False):
+        while True:
+            hk = ask("头名称（留空结束）", required=False)
+            if not hk:
+                break
+            headers[hk] = ask("  %s 的值" % hk)
+
+    ek, eb = env_key_name(name), env_key_name(name) + "_BASE"
+    env[ek] = key
+    env[eb] = base
+    reg["upstreams"][name] = {
+        "model": model, "env_key": ek, "env_base": eb,
+        "context_window": ctx, "max_output_tokens": out,
+        "params": params, "headers": headers,
+    }
+    if not reg.get("default"):
+        reg["default"] = name
+    save_registry(reg)
+    write_env(env)
+    ok("已添加上游 '%s'" % name)
+
+
+def cmd_add(argv):
+    reg, env = load_registry(), read_env()
+    _add_one(reg, env)
+    sync(reg)
+
+
+def cmd_ls(argv):
+    reg = load_registry()
+    if not reg["upstreams"]:
+        warn("还没有上游。跑 `lc init` 或 `lc add`")
+        return
+    env = read_env()
+    head("上游列表  (默认: %s)" % (reg.get("default") or "无"))
+    for name in sorted(reg["upstreams"]):
+        u = reg["upstreams"][name]
+        mark = "%s*%s" % (C["g"], C["x"]) if name == reg.get("default") else " "
+        p = u.get("params", {})
+        think = p.get("enable_thinking",
+                      p.get("chat_template_kwargs", {}).get("enable_thinking"))
+        flags = []
+        if think is False:
+            flags.append("thinking=off")
+        if u.get("headers"):
+            flags.append("headers=%d" % len(u["headers"]))
+        say("%s %s%-20s%s %s" % (mark, C["B"], name, C["x"], u["model"]))
+        say("   %s%s%s" % (C["d"], env.get(u["env_base"], "?"), C["x"]))
+        say("   %sctx=%d out=%d %s%s" % (C["d"], u["context_window"],
+                                         u["max_output_tokens"], " ".join(flags), C["x"]))
+
+
+def cmd_use(argv):
+    if not argv:
+        die("用法: lc use <name>")
+    reg = load_registry()
+    if argv[0] not in reg["upstreams"]:
+        die("没有上游 '%s'。可用: %s" % (argv[0], ", ".join(sorted(reg["upstreams"]))))
+    reg["default"] = argv[0]
+    save_registry(reg)
+    sync(reg, quiet=True)
+    ok("默认上游已切换为 %s" % argv[0])
+
+
+def cmd_rm(argv):
+    if not argv:
+        die("用法: lc rm <name>")
+    reg, env = load_registry(), read_env()
+    u = reg["upstreams"].pop(argv[0], None)
+    if not u:
+        die("没有上游 '%s'" % argv[0])
+    env.pop(u["env_key"], None)
+    env.pop(u["env_base"], None)
+    if reg.get("default") == argv[0]:
+        reg["default"] = sorted(reg["upstreams"])[0] if reg["upstreams"] else None
+    save_registry(reg)
+    write_env(env)
+    if reg["upstreams"]:
+        sync(reg, quiet=True)
+    ok("已删除 '%s'" % argv[0])
+
+
+def cmd_up(argv):
+    reg = load_registry()
+    sync(reg, quiet=True)
+    compose("up", "-d", "--force-recreate")
+    n = wait_gw(reg)
+    if n:
+        ok("网关就绪 (%ds) %s" % (n, gw_url(reg)))
+    else:
+        err("网关未在 45s 内就绪，看日志: lc logs")
+
+
+def cmd_down(argv):
+    compose("down")
+
+
+def cmd_logs(argv):
+    compose("logs", "-f", *argv)
+
+
+def cmd_status(argv):
+    reg = load_registry()
+    compose("ps")
+    say()
+    if gw_alive(reg):
+        ok("网关存活 %s" % gw_url(reg))
+    else:
+        err("网关无响应")
+
+
+def _run_py(script, args):
+    env = dict(os.environ)
+    env["CODEX_HOME"] = str(CODEX_DIR)
+    return subprocess.call([sys.executable, str(ROOT / "scripts" / script)] + args, env=env)
+
+
+def cmd_test(argv):
+    reg = load_registry()
+    names = argv or [reg.get("default")]
+    rc = 0
+    for n in names:
+        rc |= _run_py("smoke.py", [n])
+    sys.exit(rc)
+
+
+def cmd_e2e(argv):
+    reg = load_registry()
+    names = argv or [reg.get("default")]
+    rc = 0
+    for n in names:
+        rc |= subprocess.call([str(ROOT / "scripts" / "test-codex.sh"), n])
+    sys.exit(rc)
+
+
+def cmd_code(argv):
+    reg = load_registry()
+    if not gw_alive(reg):
+        die("网关没起来，先跑 `lc up`")
+    env = dict(os.environ)
+    env["CODEX_HOME"] = str(CODEX_DIR)
+    env.update(read_env())
+    profile = reg.get("default")
+    sys.exit(subprocess.call(["codex", "--profile", profile] + list(argv), env=env))
+
+
+def cmd_doctor(argv):
+    reg = load_registry()
+    head("环境体检")
+    for tool in ("docker", "codex"):
+        p = shutil.which(tool)
+        ok("%s: %s" % (tool, p)) if p else err("%s 未安装" % tool)
+
+    proxies = [k for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                           "http_proxy", "https_proxy", "all_proxy") if os.environ.get(k)]
+    if proxies:
+        warn("检测到代理环境变量: %s" % ", ".join(proxies))
+        say("   %s内网地址可能被代理劫持。给内网域名加 DIRECT 规则，或设 NO_PROXY。%s"
+            % (C["d"], C["x"]))
+    else:
+        ok("无代理环境变量")
+
+    env = read_env()
+    if env.get("LITELLM_MASTER_KEY"):
+        ok("master key 已设置")
+    else:
+        err("缺 LITELLM_MASTER_KEY，跑 `lc init`")
+
+    if not reg["upstreams"]:
+        err("没有配置上游")
+    else:
+        ok("%d 个上游，默认 %s" % (len(reg["upstreams"]), reg.get("default")))
+
+    if gw_alive(reg):
+        ok("网关存活 %s" % gw_url(reg))
+    else:
+        warn("网关未运行（`lc up` 启动）")
+
+    head("上游直连探测（绕过网关）")
+    import urllib.request
+    import urllib.error
+    for name in sorted(reg["upstreams"]):
+        u = reg["upstreams"][name]
+        base = env.get(u["env_base"], "")
+        req = urllib.request.Request(
+            base + "/chat/completions",
+            data=json.dumps({"model": u["model"], "max_tokens": 8,
+                             "messages": [{"role": "user", "content": "hi"}]}).encode(),
+            headers={"Authorization": "Bearer " + env.get(u["env_key"], ""),
+                     "Content-Type": "application/json"}, method="POST")
+        try:
+            urllib.request.urlopen(req, timeout=20).read()
+            ok("%s 可达" % name)
+        except urllib.error.HTTPError as e:
+            warn("%s HTTP %s: %s" % (name, e.code, e.read()[:120].decode("utf8", "replace")))
+        except Exception as e:
+            err("%s 不可达: %s" % (name, e))
+
+
+def cmd_sync(argv):
+    sync()
+
+
+COMMANDS = [
+    ("init", cmd_init, "交互式初始化（生成 master key、添加上游）"),
+    ("add", cmd_add, "交互式添加一个上游"),
+    ("ls", cmd_ls, "列出所有上游"),
+    ("use", cmd_use, "切换默认上游: lc use <name>"),
+    ("rm", cmd_rm, "删除上游: lc rm <name>"),
+    ("up", cmd_up, "启动网关"),
+    ("down", cmd_down, "停止网关"),
+    ("status", cmd_status, "查看网关状态"),
+    ("logs", cmd_logs, "跟踪网关日志"),
+    ("test", cmd_test, "协议层 5 项测试: lc test [name...]"),
+    ("e2e", cmd_e2e, "端到端测试（真改代码）: lc e2e [name...]"),
+    ("code", cmd_code, "用当前上游启动 Codex: lc code [codex 参数]"),
+    ("doctor", cmd_doctor, "环境体检（含代理劫持检测）"),
+    ("sync", cmd_sync, "由 registry.json 重新生成配置"),
+]
+
+
+def usage():
+    say("%sairgap-coder%s — 内网离线 AI 编码 CLI\n" % (C["B"], C["x"]))
+    say("用法: lc <命令> [参数]\n")
+    for n, _, d in COMMANDS:
+        say("  %s%-8s%s %s" % (C["B"], n, C["x"], d))
+    say("\n配置全部通过命令完成，不需要手改 yaml/toml。")
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        usage()
+        return
+    for n, fn, _ in COMMANDS:
+        if argv[0] == n:
+            return fn(argv[1:])
+    die("未知命令 '%s'，看 `lc help`" % argv[0])
+
+
+if __name__ == "__main__":
+    main()

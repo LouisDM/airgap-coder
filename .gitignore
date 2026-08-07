@@ -1,0 +1,19 @@
+# ── 密钥，绝不提交 ──────────────────────────────────
+.env
+
+# 站点特定的上游注册表（由 lc 生成，含内网地址）；模板见 registry.example.json
+registry.json
+
+# ── 生成物 ────────────────────────────────────────
+# codex/ 是 CODEX_HOME，内容全部由 `lc sync` 生成或 Codex 运行时产生
+# （config.toml、profile、以及 sqlite 会话库 / installation_id / skills）。
+# 会话库可能含代码片段与 prompt，尤其不能入库。
+codex/
+
+litellm/config.yaml
+
+# 测试沙箱
+.smoke/
+
+.DS_Store
+__pycache__/

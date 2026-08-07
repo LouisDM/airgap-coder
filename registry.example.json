@@ -1,0 +1,18 @@
+{
+  "_comment": "上游注册表示例。真实的 registry.json 由 `lc init` / `lc add` 生成并被 gitignore（含站点特定地址）。密钥永远只在 .env 里，此文件不含密钥。",
+  "default": "intranet",
+  "gateway_port": 4000,
+  "upstreams": {
+    "intranet": {
+      "model": "Qwen/Qwen3-32B",
+      "env_key": "KEY_INTRANET",
+      "env_base": "KEY_INTRANET_BASE",
+      "context_window": 131072,
+      "max_output_tokens": 16384,
+      "params": {
+        "chat_template_kwargs": { "enable_thinking": false }
+      },
+      "headers": {}
+    }
+  }
+}
