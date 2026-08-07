@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 说明：真正的功能测试（scripts/smoke.py / test-codex.sh）需要一个活的
+# LiteLLM 网关和真实模型 API Key，CI 环境两者都没有。所以这里只做静态验证：
+# 语法、CLI 可执行性、以及最关键的——配置生成器的输出是否正确。
+# 配置生成器是整个项目最容易出错的地方（协议开关、参数名、profile 文件结构）。
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"   # 与 macOS 自带版本对齐，避免用到更新的语法
+
+      - name: Python 语法检查
+        run: python3 -m py_compile bin/lc scripts/smoke.py
+
+      - name: Shell 语法检查
+        run: bash -n scripts/test-codex.sh docker/entrypoint.sh scripts/smoke.sh
+
+      - name: CLI 可执行
+        run: |
+          python3 bin/lc --help
+          python3 bin/lc help
+
+      - name: 配置生成器输出校验
+        run: |
+          set -euo pipefail
+          cp registry.example.json registry.json
+          cat > .env <<'EOF'
+          LITELLM_MASTER_KEY=sk-ci-fake
+          GATEWAY_PORT=4000
+          KEY_INTRANET=fake-key
+          KEY_INTRANET_BASE=http://vllm.example.local:8000/v1
+          EOF
+          python3 bin/lc sync
+
+          echo "--- 生成的 litellm/config.yaml ---"
+          cat litellm/config.yaml
+          echo "--- 生成的 codex/intranet.config.toml ---"
+          cat codex/intranet.config.toml
+
+          # 这些断言对应项目里踩过的坑，回归了就红
+          grep -q 'use_chat_completions_api: true' litellm/config.yaml \
+            || { echo "::error::缺 use_chat_completions_api，/v1/responses 会被透传给上游导致 404"; exit 1; }
+          grep -q 'chat_template_kwargs' litellm/config.yaml \
+            || { echo "::error::vLLM 的关思考参数丢失"; exit 1; }
+          grep -q 'wire_api = "responses"' codex/config.toml \
+            || { echo "::error::wire_api 必须是 responses，Codex 0.145+ 已移除 chat"; exit 1; }
+          grep -q 'include_apply_patch_tool = true' codex/intranet.config.toml \
+            || { echo "::error::缺 include_apply_patch_tool，模型会退化成 shell heredoc 写文件"; exit 1; }
+          grep -q 'model_context_window' codex/intranet.config.toml \
+            || { echo "::error::缺上下文预算声明"; exit 1; }
+
+      - name: 确认敏感文件不会被提交
+        run: |
+          set -euo pipefail
+          # 上一步刻意造了 .env 和 registry.json，它们必须被 gitignore 拦住
+          for f in .env registry.json; do
+            git check-ignore -q "$f" \
+              || { echo "::error::$f 没有被 .gitignore 排除，有泄漏风险"; exit 1; }
+          done
+          test -z "$(git status --porcelain --untracked-files=normal)" \
+            || { echo "::error::生成物污染了工作区，说明有文件没被 gitignore:"; git status --short; exit 1; }
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 构建离线开发镜像
+        run: docker build -f docker/Dockerfile -t airgap-coder:ci .
+      - name: entrypoint 缺参数时应当明确报错
+        run: |
+          if docker run --rm airgap-coder:ci exec "test" 2>&1 | grep -q 'GATEWAY_URL'; then
+            echo "✅ 缺 GATEWAY_URL 时给出了明确提示"
+          else
+            echo "::error::entrypoint 没有校验必需的环境变量"; exit 1
+          fi
