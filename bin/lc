@@ -577,12 +577,51 @@ def cmd_code(argv):
     sys.exit(subprocess.call(["codex", "--profile", profile] + list(argv), env=env))
 
 
+def _dockerfile_codex_version():
+    """ARG CODEX_VERSION pinned in docker/Dockerfile (airgap lock)."""
+    df = ROOT / "docker" / "Dockerfile"
+    if not df.is_file():
+        return None
+    for line in df.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"\s*ARG\s+CODEX_VERSION=(\S+)", line)
+        if m:
+            return m.group(1).strip().strip('"').strip("'")
+    return None
+
+
+def _local_codex_version():
+    """Best-effort `codex --version` parse; None if not installed / fails."""
+    p = shutil.which("codex")
+    if not p:
+        return None
+    try:
+        out = subprocess.check_output(
+            [p, "--version"], text=True, stderr=subprocess.STDOUT, timeout=10
+        )
+    except Exception:
+        return None
+    m = re.search(r"(\d+\.\d+(?:\.\d+)?)", out)
+    return m.group(1) if m else out.strip().splitlines()[0][:40]
+
+
 def cmd_doctor(argv):
     reg = load_registry()
     head("环境体检")
     for tool in ("docker", "codex"):
         p = shutil.which(tool)
         ok("%s: %s" % (tool, p)) if p else err("%s 未安装" % tool)
+
+    pinned = _dockerfile_codex_version()
+    local = _local_codex_version()
+    if pinned and local:
+        if local == pinned or local.startswith(pinned + ".") or pinned.startswith(local):
+            ok("codex 版本与 Dockerfile 锁定一致 (%s)" % pinned)
+        else:
+            warn("本机 Codex %s 与 Dockerfile 锁定的 %s 不一致" % (local, pinned))
+            say("   %s协议层差异可能导致「本地正常、容器失败」。%s" % (C["d"], C["x"]))
+            say("   %s对齐: npm i -g @openai/codex@%s%s" % (C["d"], pinned, C["x"]))
+    elif pinned and not local:
+        warn("无法读取本机 codex --version；Dockerfile 锁定 %s" % pinned)
 
     proxies = [k for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
                            "http_proxy", "https_proxy", "all_proxy") if os.environ.get(k)]
