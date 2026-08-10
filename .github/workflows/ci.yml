@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # issue-agent 用 GITHUB_TOKEN 推分支/开 PR，GitHub 为防递归不会为这类事件
+  # 产生 workflow run，所以它必须能显式触发本流水线来验证自己的改动：
+  #   gh workflow run ci.yml --ref <branch>
+  workflow_dispatch:
 
 # 说明：真正的功能测试（scripts/smoke.py / test-codex.sh）需要一个活的
 # LiteLLM 网关和真实模型 API Key，CI 环境两者都没有。所以这里只做静态验证：
