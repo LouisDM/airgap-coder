@@ -164,6 +164,62 @@ check assert "鉴权失败" "401 给出定向提示"
 run_doctor http404
 check assert "地址或模型 ID 不对" "404 给出定向提示"
 
+echo "[8] 本机 Codex 版本与 Dockerfile 锁定版本的比对"
+# 这段不需要桩上游（探测会失败，doctor 仍 exit 0），只看版本比对那几行。
+# 用假 Dockerfile 钉 pin、用假 codex 钉本机版本，两者都在临时目录里。
+mkdir -p "$WORK/docker" "$WORK/fakebin"
+
+pin_version() { printf 'ARG CODEX_VERSION=%s\n' "$1" > "$WORK/docker/Dockerfile"; }
+
+fake_codex() {   # $1 = `codex --version` 打印的内容；不传则删掉假 codex
+  if [ "$#" -eq 0 ]; then
+    rm -f "$WORK/fakebin/codex"
+  else
+    printf '#!/usr/bin/env bash\necho "%s"\n' "$1" > "$WORK/fakebin/codex"
+    chmod +x "$WORK/fakebin/codex"
+  fi
+}
+
+run_doctor_version() {
+  PATH="$WORK/fakebin:$PATH" NO_COLOR=1 \
+    python3 "$WORK/bin/lc" doctor > "$WORK/out" 2>&1 || true
+}
+
+pin_version 0.145.0
+
+fake_codex "codex-cli 0.145.0"
+run_doctor_version
+check assert "codex 版本与 Dockerfile 锁定一致 (0.145.0)" "版本相同时判为一致"
+check refute "不一致" "版本相同时不误报"
+
+fake_codex "codex-cli 0.147.0"
+run_doctor_version
+check assert "本机 Codex 0.147.0 与 Dockerfile 锁定的 0.145.0 不一致" "版本不同时给出 warning"
+check assert "npm i -g @openai/codex@0.145.0" "warning 附带可直接执行的对齐命令"
+
+# 关键回归：两段式输出不能被前缀匹配吞掉。"0.145.0".startswith("0.14") 为真，
+# 按前缀比会把它判成「一致」——而这正是本检查要防的静默通过。
+fake_codex "codex-cli 0.14"
+run_doctor_version
+check assert "本机 Codex 0.14 与 Dockerfile 锁定的 0.145.0 不一致" "两段式版本不被前缀匹配误判为一致"
+
+# 反过来，0.145 和 0.145.0 是同一个版本，补零后应当判一致。
+fake_codex "codex-cli 0.145"
+run_doctor_version
+check assert "codex 版本与 Dockerfile 锁定一致" "省略末段的同一版本判为一致"
+
+# 版本号解析不出来时，不能把随便一段文本当成版本号打进 warning
+fake_codex "codex-cli (unknown build)"
+run_doctor_version
+check assert "无法读取本机 codex --version" "解析不出版本号时降级为明确提示"
+check refute "不一致" "解析失败时不拿非版本号文本去比对"
+
+# codex 根本没装：上面 tool 检查已经报过了，这里不该再刷一条版本 warning
+fake_codex
+run_doctor_version
+check assert "codex 未安装" "没装 codex 时如实报告"
+check refute "无法读取本机 codex --version" "没装 codex 时不重复刷版本提示"
+
 if [ "$fails" -gt 0 ]; then
   echo "=== 失败 $fails 项 ==="
   exit 1
