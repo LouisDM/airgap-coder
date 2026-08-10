@@ -515,25 +515,92 @@ def cmd_doctor(argv):
     else:
         warn("网关未运行（`lc up` 启动）")
 
-    head("上游直连探测（绕过网关）")
-    import urllib.request
-    import urllib.error
+    head("上游直连探测（绕过网关，带 tools）")
+    say("%s只测「连得上」是不够的：内网最常见的失败是连得上、聊天正常、"
+        "tool_calls 恒为空。%s" % (C["d"], C["x"]))
     for name in sorted(reg["upstreams"]):
-        u = reg["upstreams"][name]
-        base = env.get(u["env_base"], "")
-        req = urllib.request.Request(
-            base + "/chat/completions",
-            data=json.dumps({"model": u["model"], "max_tokens": 8,
-                             "messages": [{"role": "user", "content": "hi"}]}).encode(),
-            headers={"Authorization": "Bearer " + env.get(u["env_key"], ""),
-                     "Content-Type": "application/json"}, method="POST")
-        try:
-            urllib.request.urlopen(req, timeout=20).read()
-            ok("%s 可达" % name)
-        except urllib.error.HTTPError as e:
-            warn("%s HTTP %s: %s" % (name, e.code, e.read()[:120].decode("utf8", "replace")))
-        except Exception as e:
-            err("%s 不可达: %s" % (name, e))
+        _probe_upstream(name, reg["upstreams"][name], env)
+
+
+def _probe_upstream(name, u, env):
+    """直连一个上游，断言 tool calling 真的生效（而不只是 200）。"""
+    import urllib.error
+    import urllib.request
+
+    scripts = str(ROOT / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    try:
+        # 判据与 scripts/smoke.py 共用一份，避免两边结论打架
+        import probe
+    except ImportError as e:
+        err("读不到 scripts/probe.py，无法探测 %s: %s" % (name, e))
+        return
+
+    base = env.get(u["env_base"], "")
+    if not base:
+        err("%s: .env 里没有 %s，不知道它的地址" % (name, u["env_base"]))
+        return
+
+    headers = {"Authorization": "Bearer " + env.get(u["env_key"], ""),
+               "Content-Type": "application/json"}
+    # 带上该上游登记的自定义头与额外参数（如关思考模式的开关），
+    # 否则 doctor 打出去的请求和网关实际发出的请求不是同一个配置，
+    # 探测结论迁移不到真实链路上。
+    for k, v in (u.get("headers") or {}).items():
+        headers[str(k)] = str(v)
+    payload = probe.chat_payload(u["model"], u.get("params"))
+
+    req = urllib.request.Request(base + "/chat/completions",
+                                 data=json.dumps(payload).encode(),
+                                 headers=headers, method="POST")
+    try:
+        raw = urllib.request.urlopen(req, timeout=60).read()
+    except urllib.error.HTTPError as e:
+        body = e.read()[:200].decode("utf8", "replace")
+        if e.code in (401, 403):
+            err("%s HTTP %s —— 鉴权失败，核对 .env 里的 %s" % (name, e.code, u["env_key"]))
+        elif e.code == 404:
+            err("%s HTTP 404 —— 地址或模型 ID 不对。核对 .env 的 %s（要到 /v1 为止）"
+                "与 registry 里的 model=%s" % (name, u["env_base"], u["model"]))
+        elif e.code == 400:
+            err("%s HTTP 400 —— 上游拒绝了带 tools 的请求" % name)
+            say("   %s↳ 怎么修: %s%s" % (C["d"], probe.hint("tools_request_failed"), C["x"]))
+        else:
+            warn("%s HTTP %s" % (name, e.code))
+        say("   %s%s%s" % (C["d"], body, C["x"]))
+        return
+    except Exception as e:
+        err("%s 不可达: %s" % (name, e))
+        say("   %s↳ 怎么修: %s%s" % (C["d"], probe.hint("chat_failed"), C["x"]))
+        return
+
+    try:
+        resp = json.loads(raw.decode("utf8", "replace"))
+    except ValueError:
+        err("%s 返回 200 但不是 JSON" % name)
+        say("   %s↳ 怎么修: %s%s" % (C["d"], probe.hint("bad_response"), C["x"]))
+        return
+
+    good, key, detail = probe.check_tool_call(resp)
+    if good:
+        ok("%s 可达，tool calling 生效 (%s)" % (name, detail))
+    else:
+        err("%s %s" % (name, probe.title(key)))
+        if detail:
+            say("   %s%s%s" % (C["d"], str(detail)[:200], C["x"]))
+        say("   %s↳ 怎么修: %s%s" % (C["d"], probe.hint(key), C["x"]))
+
+    # 思考模式不算错误，但 <think> 块会干扰 tool call 解析，值得提示。
+    leak = probe.reasoning_leak(resp)
+    if leak:
+        warn("%s 思考模式似乎还开着（%s）" % (name, leak))
+        if u.get("params"):
+            say("   %s已配 %s，但上游没认——参数名很可能选错了。%s"
+                % (C["d"], ", ".join(sorted(u["params"])), C["x"]))
+        else:
+            say("   %s该上游没配关思考模式的参数。%s" % (C["d"], C["x"]))
+        say("   %s↳ 怎么修: %s%s" % (C["d"], probe.hint("thinking_on"), C["x"]))
 
 
 def cmd_sync(argv):
@@ -553,7 +620,7 @@ COMMANDS = [
     ("test", cmd_test, "协议层 5 项测试: lc test [name...]"),
     ("e2e", cmd_e2e, "端到端测试（真改代码）: lc e2e [name...]"),
     ("code", cmd_code, "用当前上游启动 Codex: lc code [codex 参数]"),
-    ("doctor", cmd_doctor, "环境体检（含代理劫持检测）"),
+    ("doctor", cmd_doctor, "环境体检（代理劫持 + 上游 tool calling 探测）"),
     ("sync", cmd_sync, "由 registry.json 重新生成配置"),
 ]
 
