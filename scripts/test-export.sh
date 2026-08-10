@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# 钉住 `lc export` 打出来的离线包（issue #5）。
+#
+# 这个包是整个项目唯一一次真正的隔离网穿越：它离开有外网的机器、跨网传递，
+# 到了内网就没有补救手段。所以最重要的断言不是「该有的都有」，而是
+# 「不该带走的一个都没带」——.env / registry.json / 生成物 / 会话库。
+#
+# 用法: bash scripts/test-export.sh     （零依赖，只用 Python 标准库 + tar）
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# 整份测试在仓库的一份副本里跑：lc 的 ROOT 由自身路径推导，产物和造出来的
+# 假 .env / registry.json 都落在 ROOT 下，不能污染开发机上的真实文件。
+# 连 .git 一起复制，这样 `git ls-files` 看到的就是当前工作树的真实状态。
+WORK="$(mktemp -d)"
+cleanup() { rm -rf "$WORK"; }
+trap cleanup EXIT
+
+cp -r "$REPO" "$WORK/repo"
+SRC="$WORK/repo"
+OUT="$WORK/out"
+mkdir -p "$OUT"
+
+# 造出该被拦住的文件。它们都被 .gitignore 排除，所以 git ls-files 看不见；
+# 但这个测试的意义就在于不只依赖 gitignore 正确。
+cat > "$SRC/.env" <<'EOF'
+LITELLM_MASTER_KEY=sk-must-not-leak
+KEY_INTRANET=must-not-leak-either
+KEY_INTRANET_BASE=http://vllm.example.local:8000/v1
+EOF
+cp "$SRC/registry.example.json" "$SRC/registry.json"
+mkdir -p "$SRC/litellm" "$SRC/codex"
+echo "model_list: []" > "$SRC/litellm/config.yaml"
+echo "fake sqlite with prompts" > "$SRC/codex/sessions.sqlite"
+
+fails=0
+check() {        # check assert|refute <字符串> <说明>；在 $LIST 里找
+  local mode="$1" needle="$2" why="$3" hit=0
+  grep -qF -e "$needle" "$LIST" && hit=1
+  if { [ "$mode" = assert ] && [ "$hit" = 1 ]; } ||
+     { [ "$mode" = refute ] && [ "$hit" = 0 ]; }; then
+    echo "  ✅ $why"
+  else
+    echo "  ❌ $why"
+    echo "::error::$why"
+    fails=$((fails + 1))
+  fi
+}
+
+echo "[1] lc export --no-images：包的内容清单"
+NO_COLOR=1 python3 "$SRC/bin/lc" export --no-images --out "$OUT/bundle.tar.gz" \
+  > "$OUT/log" 2>&1 || { cat "$OUT/log"; echo "::error::lc export 失败"; exit 1; }
+cat "$OUT/log"
+LIST="$OUT/list"
+tar tzf "$OUT/bundle.tar.gz" > "$LIST"
+
+check assert "/install.sh"            "包里有 install.sh"
+check assert "/MANIFEST.txt"          "包里有 MANIFEST.txt"
+check assert "/bin/lc"                "包里有 bin/lc"
+check assert "/README.md"             "包里有 README.md"
+check assert "/registry.example.json" "包里有 registry.example.json（内网侧的最小示例）"
+check assert "/docker/Dockerfile"      "包里有 Dockerfile"
+check assert "/scripts/probe.py"       "包里有 scripts/"
+
+echo "[2] 不该带走的一个都不许在包里"
+# 按包内相对路径精确比对。子串匹配在这里会骗人：".env" 能在 ".env.example"
+# 里找到，那是该带走的文件。
+RELLIST="$OUT/rellist"
+sed 's|^[^/]*/||' "$LIST" > "$RELLIST"
+checkre() {      # checkre assert|refute <正则> <说明>
+  local mode="$1" re="$2" why="$3" hit=0
+  grep -qE "$re" "$RELLIST" && hit=1
+  if { [ "$mode" = assert ] && [ "$hit" = 1 ]; } ||
+     { [ "$mode" = refute ] && [ "$hit" = 0 ]; }; then
+    echo "  ✅ $why"
+  else
+    echo "  ❌ $why"
+    echo "::error::$why"
+    fails=$((fails + 1))
+  fi
+}
+checkre refute '^\.env$'                ".env 不在包里"
+checkre refute '^registry\.json$'       "registry.json 不在包里（站点特定）"
+checkre refute '^litellm/config\.yaml$' "生成的网关配置不在包里"
+checkre refute '^codex/'                "CODEX_HOME 不在包里（会话库可能含代码与 prompt）"
+checkre refute '^\.git/'                ".git 不在包里"
+checkre assert '^\.env\.example$'       ".env.example 该带走，没被上面的排除规则误伤"
+# 上面是按路径查，这里再按内容查一遍：密钥值绝不能出现在任何一个文件里
+if gunzip -c "$OUT/bundle.tar.gz" | grep -qa "must-not-leak"; then
+  echo "  ❌ 包的字节流里出现了 .env 里的密钥值"
+  echo "::error::包的字节流里出现了 .env 里的密钥值"
+  fails=$((fails + 1))
+else
+  echo "  ✅ 包的字节流里搜不到 .env 里的密钥值"
+fi
+
+echo "[3] MANIFEST 的内容"
+mkdir -p "$OUT/x" && tar xzf "$OUT/bundle.tar.gz" -C "$OUT/x"
+DIR="$(find "$OUT/x" -maxdepth 1 -mindepth 1 -type d | head -1)"
+LIST="$DIR/MANIFEST.txt"
+cat "$LIST"
+PIN="$(sed -n 's/^ARG CODEX_VERSION=//p' "$SRC/docker/Dockerfile" | head -1)"
+check assert "$PIN"                  "MANIFEST 里的 Codex 版本取自 Dockerfile（不写死）"
+check assert "ghcr.io/berriai/litellm" "MANIFEST 里记了网关镜像名"
+check assert "digest"                 "MANIFEST 提到 digest（main-stable 是移动 tag，核对要看 digest）"
+check assert "导出时间"                "MANIFEST 记了导出时间"
+test -x "$DIR/install.sh" \
+  && echo "  ✅ install.sh 是可执行的" \
+  || { echo "  ❌ install.sh 没有可执行位"; fails=$((fails + 1)); }
+test -x "$DIR/bin/lc" \
+  && echo "  ✅ bin/lc 的可执行位在打包后仍保留" \
+  || { echo "  ❌ bin/lc 打包后丢了可执行位，内网侧要手动 chmod"; fails=$((fails + 1)); }
+bash -n "$DIR/install.sh" \
+  && echo "  ✅ 生成的 install.sh 语法正确" \
+  || { echo "  ❌ 生成的 install.sh 语法错误"; fails=$((fails + 1)); }
+
+echo "[4] 参数校验"
+if NO_COLOR=1 python3 "$SRC/bin/lc" export --bogus > "$OUT/log2" 2>&1; then
+  echo "  ❌ 未知参数应当报错退出"; fails=$((fails + 1))
+else
+  LIST="$OUT/log2"; check assert "未知参数" "未知参数给出明确报错而不是静默忽略"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────
+# 带镜像那条路需要 docker。用一个极小的镜像替身：把副本里的 Dockerfile /
+# docker-compose.yml 改成指向它，就不用给生产代码开测试钩子，也不会碰到
+# 开发机上真实的 litellm 镜像 tag。
+# ─────────────────────────────────────────────────────────────────────────
+if command -v docker >/dev/null 2>&1 &&
+   docker pull -q hello-world >/dev/null 2>&1 &&
+   docker tag hello-world airgap-coder:test-tiny >/dev/null 2>&1; then
+  echo "[5] 带镜像导出（用 hello-world 当镜像替身）"
+  sed -i.bak 's/^ARG CODEX_VERSION=.*/ARG CODEX_VERSION=test-tiny/' "$SRC/docker/Dockerfile"
+  sed -i.bak 's#image: ghcr.io/berriai/litellm:main-stable#image: hello-world:latest#' \
+    "$SRC/docker-compose.yml"
+  NO_COLOR=1 python3 "$SRC/bin/lc" export --out "$OUT/full.tar.gz" \
+    > "$OUT/log3" 2>&1 || { cat "$OUT/log3"; echo "::error::带镜像导出失败"; exit 1; }
+  cat "$OUT/log3"
+  LIST="$OUT/list3"
+  tar tzf "$OUT/full.tar.gz" > "$LIST"
+  check assert "images/airgap-coder.tar.gz" "开发镜像 tar 在包里"
+  check assert "images/litellm.tar.gz"      "网关镜像 tar 在包里"
+  check assert "/SHA256SUMS"                "有 SHA256SUMS 供内网侧核完整性"
+
+  mkdir -p "$OUT/y" && tar xzf "$OUT/full.tar.gz" -C "$OUT/y"
+  DIR2="$(find "$OUT/y" -maxdepth 1 -mindepth 1 -type d | head -1)"
+  ( cd "$DIR2" && sha256sum -c SHA256SUMS ) >/dev/null \
+    && echo "  ✅ SHA256SUMS 与包内镜像 tar 对得上" \
+    || { echo "  ❌ SHA256SUMS 校验不过"; fails=$((fails + 1)); }
+  LIST="$DIR2/MANIFEST.txt"
+  check assert "sha256 :" "MANIFEST 记了每个镜像 tar 的 sha256"
+  # 拉下来的镜像有 RepoDigest，本地 tag 的没有——两条分支都要有话说，
+  # 不能出现空的 digest 行
+  check refute "digest : $" "digest 行不为空（本地构建的镜像也要有明确说明）"
+  gunzip -c "$DIR2/images/litellm.tar.gz" | tar t >/dev/null \
+    && echo "  ✅ 镜像 tar 是完整的 gzip+tar（流式落盘没写坏）" \
+    || { echo "  ❌ 镜像 tar 坏了"; fails=$((fails + 1)); }
+
+  echo "[6] 内网侧：真跑一遍 install.sh"
+  # 这一步是整条链路的终点：包解开、校验、docker load 真的能过。
+  # 只在这里能发现「包打得对但装不上」这类问题。
+  if "$DIR2/install.sh" > "$OUT/install.log" 2>&1; then
+    LIST="$OUT/install.log"
+    check assert "镜像已就位"      "install.sh 跑通并给出下一步指引"
+    check assert "docker load"     "install.sh 真的 docker load 了镜像"
+    check refute "跳过 sha256 校验" "install.sh 做了 sha256 校验（没走跳过分支）"
+    check assert "./bin/lc init"   "指引里第一步是 lc init"
+  else
+    cat "$OUT/install.log"
+    echo "  ❌ install.sh 执行失败"
+    echo "::error::install.sh 执行失败"
+    fails=$((fails + 1))
+  fi
+  docker rmi airgap-coder:test-tiny >/dev/null 2>&1 || true
+else
+  echo "[5] 跳过带镜像导出：没有 docker 或拉不到 hello-world（不算失败）"
+fi
+
+if [ "$fails" -gt 0 ]; then
+  echo "=== 失败 $fails 项 ==="
+  exit 1
+fi
+echo "=== 全部通过 ==="

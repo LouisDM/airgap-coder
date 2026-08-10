@@ -15,6 +15,7 @@
     lc doctor            环境体检
     lc sync              由注册表重新生成 litellm/codex 配置
     lc migrate           把 registry 里遗留的明文 header 值搬进 .env
+    lc export            打一个可搬运进内网的自包含离线包
 
 真实密钥只写入 .env（已 gitignore）；registry.json 只存非敏感信息，可以提交：
 地址、API Key、自定义 HTTP 头的值都只留变量名，实际值在 .env 里。
@@ -765,6 +766,294 @@ def cmd_sync(argv):
     sync()
 
 
+# ------------------------------------------------------------------ export
+#
+# 这是整个项目唯一一次真正的隔离网穿越（issue #5）：产物离开有外网的机器，
+# 到内网就没有补救手段了。所以这里的取舍一律偏保守：
+#   - 源码清单用 `git ls-files`，天然尊重 .gitignore，不手写排除列表；
+#   - 打完包再显式断言敏感路径不在包里（纵深防御，不只依赖 gitignore 正确）；
+#   - MANIFEST 记镜像 digest 而不只是 tag，因为 litellm 用的是 main-stable
+#     这种移动 tag，两次 pull 可能拿到不同镜像却写着同一个版本号；
+#   - 镜像 tar 是 GB 级，流式落盘，不进内存。
+
+# 不管 git 怎么说，这些路径永远不进包。registry.json 也在里面：它虽然只存变量名
+# （issue #4 之后可能变成受版本控制的文件），但仍是站点特定的，不该跟着包乱跑。
+BUNDLE_NEVER = (".env", ".env.local", "registry.json", "litellm/config.yaml")
+BUNDLE_NEVER_DIRS = ("codex/", ".smoke/", ".git/")
+
+
+def _compose_litellm_image():
+    """docker-compose.yml 里 litellm 服务用的镜像（含 tag 或 digest）。"""
+    f = ROOT / "docker-compose.yml"
+    if not f.is_file():
+        return None
+    for line in f.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"\s*image:\s*(\S+)", line)
+        if m:
+            return m.group(1).strip().strip('"').strip("'")
+    return None
+
+
+def _sha256(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(str(path), "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _image_digest(ref):
+    """镜像的 RepoDigest（sha256:...）。拿不到返回 None。"""
+    try:
+        out = subprocess.check_output(
+            ["docker", "image", "inspect", "--format",
+             "{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}", ref],
+            text=True, stderr=subprocess.DEVNULL, timeout=30)
+    except Exception:
+        return None
+    out = out.strip()
+    return out.split("@", 1)[1] if "@" in out else None
+
+
+def _image_exists(ref):
+    try:
+        return subprocess.call(["docker", "image", "inspect", ref],
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL) == 0
+    except Exception:
+        return False
+
+
+def _docker_save(ref, dest):
+    """流式 `docker save` 到 dest（gzip）。镜像是 GB 级，不能进内存。"""
+    import gzip
+    with gzip.open(str(dest), "wb") as out:
+        p = subprocess.Popen(["docker", "save", ref], stdout=subprocess.PIPE)
+        try:
+            while True:
+                chunk = p.stdout.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+        finally:
+            p.stdout.close()
+            rc = p.wait()
+    if rc != 0:
+        die("docker save %s 失败（退出码 %d）" % (ref, rc))
+
+
+def _tracked_files():
+    """git 认为该带走的文件。用它而不是手写排除列表——.gitignore 已经是唯一真相。"""
+    try:
+        out = subprocess.check_output(["git", "ls-files", "-z"], cwd=str(ROOT),
+                                      text=True, stderr=subprocess.STDOUT)
+    except Exception as e:
+        die("跑不了 `git ls-files`（%s）。lc export 需要在 git 仓库里执行。" % e)
+    files = [f for f in out.split("\0") if f]
+    if not files:
+        die("`git ls-files` 没列出任何文件，拒绝打一个空包")
+    keep = []
+    for f in files:
+        if f in BUNDLE_NEVER or f.startswith(BUNDLE_NEVER_DIRS):
+            continue
+        if (ROOT / f).is_file():
+            keep.append(f)
+    return keep
+
+
+INSTALL_SH = """#!/usr/bin/env bash
+# 内网侧安装脚本。由 `lc export` 生成，不要手改。
+set -euo pipefail
+cd "$(dirname "$0")"
+
+echo "== airgap-coder 离线包安装 =="
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "❌ 没有 docker，先装 docker 再来" >&2
+  exit 1
+fi
+
+# 先核完整性：跨网搬运最常见的事故是 tar 传坏了或传了半个
+if command -v sha256sum >/dev/null 2>&1; then
+  CHECK="sha256sum -c"
+elif command -v shasum >/dev/null 2>&1; then
+  CHECK="shasum -a 256 -c"
+else
+  CHECK=""
+fi
+if [ -n "$CHECK" ] && [ -f SHA256SUMS ]; then
+  echo "-- 校验 sha256"
+  $CHECK SHA256SUMS
+else
+  echo "⚠️  跳过 sha256 校验（没有 sha256sum/shasum 或缺 SHA256SUMS）"
+fi
+
+for tar in images/*.tar.gz; do
+  [ -e "$tar" ] || { echo "⚠️  包里没有镜像 tar（--no-images 导出的包），跳过 docker load"; break; }
+  echo "-- docker load $tar"
+  gunzip -c "$tar" | docker load
+done
+
+echo
+echo "✅ 镜像已就位。在当前目录接着跑："
+echo "   ./bin/lc init      # 填内网网关地址与你的 API Key"
+echo "   ./bin/lc up        # 起网关"
+echo "   ./bin/lc doctor    # 体检：连通性 + tool calling 真的生效"
+echo "   ./bin/lc code      # 开始用"
+echo
+echo "镜像名、版本与 digest 见 MANIFEST.txt。"
+"""
+
+
+def cmd_export(argv):
+    """打一个可搬运进内网的自包含离线包。"""
+    import datetime
+    import io
+    import tarfile
+    import tempfile
+
+    out_path, want_images = None, True
+    rest = list(argv)
+    while rest:
+        a = rest.pop(0)
+        if a == "--no-images":
+            want_images = False
+        elif a == "--out":
+            if not rest:
+                die("--out 后面要跟路径")
+            out_path = rest.pop(0)
+        elif a.startswith("--out="):
+            out_path = a.split("=", 1)[1]
+        else:
+            die("未知参数 '%s'。用法: lc export [--out 路径] [--no-images]" % a)
+
+    codex_ver = _dockerfile_codex_version()
+    if not codex_ver:
+        die("读不到 docker/Dockerfile 里的 ARG CODEX_VERSION，无法确定镜像版本")
+    litellm_ref = _compose_litellm_image()
+    if not litellm_ref:
+        die("读不到 docker-compose.yml 里的 litellm 镜像名")
+    dev_ref = "airgap-coder:%s" % codex_ver
+
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    bundle_name = "airgap-coder-%s-%s" % (codex_ver, stamp)
+    out = pathlib.Path(out_path).expanduser() if out_path else \
+        ROOT / ("%s.tar.gz" % bundle_name)
+    out = out.resolve()
+
+    head("导出离线包")
+    say("  开发镜像 : %s" % dev_ref)
+    say("  网关镜像 : %s" % litellm_ref)
+    say("  产物     : %s" % out)
+
+    images = []
+    if want_images:
+        for ref, fname in ((dev_ref, "airgap-coder.tar.gz"),
+                           (litellm_ref, "litellm.tar.gz")):
+            if _image_exists(ref):
+                images.append((ref, fname))
+                continue
+            err("本机没有镜像 %s" % ref)
+            if ref == dev_ref:
+                say("   %s先构建: docker build -t %s -f docker/Dockerfile .%s"
+                    % (C["d"], dev_ref, C["x"]))
+            else:
+                say("   %s先拉取: docker pull %s%s" % (C["d"], ref, C["x"]))
+            die("镜像不全，拒绝打一个到了内网才发现缺东西的包"
+                "（只要源码可以加 --no-images）")
+    else:
+        warn("--no-images：包里不含镜像，内网侧需要已经 docker load 过")
+
+    files = _tracked_files()
+    tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="lc-export-"))
+    try:
+        # 镜像先落盘到临时目录，边算 sha256 边记 digest
+        entries = []
+        for ref, fname in images:
+            say("  docker save %s ..." % ref)
+            tar_path = tmpdir / fname
+            _docker_save(ref, tar_path)
+            entries.append({
+                "file": "images/" + fname, "image": ref,
+                "digest": _image_digest(ref) or "(本地构建，无 RepoDigest)",
+                "bytes": tar_path.stat().st_size,
+                "sha256": _sha256(tar_path),
+            })
+
+        lines = [
+            "airgap-coder 离线包",
+            "",
+            "导出时间   : %s" % datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S %z").strip(),
+            "包名       : %s" % bundle_name,
+            "Codex 版本 : %s  (docker/Dockerfile 的 ARG CODEX_VERSION)" % codex_ver,
+            "源码文件数 : %d  (git ls-files，已排除 .env / registry.json / 生成物)" % len(files),
+            "",
+            "镜像:",
+        ]
+        if entries:
+            for e in entries:
+                lines += [
+                    "  %s" % e["image"],
+                    "    文件   : %s" % e["file"],
+                    "    digest : %s" % e["digest"],
+                    "    大小   : %d 字节" % e["bytes"],
+                    "    sha256 : %s" % e["sha256"],
+                ]
+        else:
+            lines.append("  （本包不含镜像，--no-images 导出）")
+        lines += [
+            "",
+            "digest 是镜像的唯一标识；tag 不是。%s 这类移动 tag 两次拉取可能是" % litellm_ref,
+            "不同镜像，内网侧核对时以 digest 为准。",
+            "",
+            "内网侧: 解包后跑 ./install.sh，然后 ./bin/lc init",
+        ]
+        manifest = "\n".join(lines) + "\n"
+
+        sums = "".join("%s  %s\n" % (e["sha256"], e["file"]) for e in entries)
+
+        def add_bytes(tf, name, text, mode=0o644):
+            data = text.encode("utf-8")
+            info = tarfile.TarInfo(bundle_name + "/" + name)
+            info.size = len(data)
+            info.mode = mode
+            info.mtime = int(os.path.getmtime(str(ROOT / "bin" / "lc")))
+            tf.addfile(info, io.BytesIO(data))
+
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(str(out), "w:gz") as tf:
+            for f in files:
+                tf.add(str(ROOT / f), arcname=bundle_name + "/" + f)
+            for _ref, fname in images:
+                tf.add(str(tmpdir / fname), arcname=bundle_name + "/images/" + fname)
+            add_bytes(tf, "MANIFEST.txt", manifest)
+            if sums:
+                add_bytes(tf, "SHA256SUMS", sums)
+            add_bytes(tf, "install.sh", INSTALL_SH, mode=0o755)
+    finally:
+        shutil.rmtree(str(tmpdir), ignore_errors=True)
+
+    # 纵深防御：包已经打完了，再独立核一遍敏感路径确实不在里面。
+    # 只靠 .gitignore 正确是不够的——这个包要离开本机、跨网传递。
+    with tarfile.open(str(out), "r:gz") as tf:
+        names = tf.getnames()
+    leaked = []
+    for n in names:
+        rel = n.split("/", 1)[1] if "/" in n else n
+        if rel in BUNDLE_NEVER or rel.startswith(BUNDLE_NEVER_DIRS):
+            leaked.append(n)
+    if leaked:
+        out.unlink()
+        die("包里出现了不该带走的文件，已删除产物：%s" % ", ".join(leaked))
+
+    ok("离线包已生成: %s (%.1f MB)" % (out, out.stat().st_size / 1048576.0))
+    say("  %s内容: 源码 %d 个文件 + %d 个镜像 + MANIFEST.txt + install.sh%s"
+        % (C["d"], len(files), len(entries), C["x"]))
+    say("  %s内网侧: tar xzf %s && cd %s && ./install.sh%s"
+        % (C["d"], out.name, bundle_name, C["x"]))
+
+
 def cmd_migrate(argv):
     """把 registry 里遗留的明文 header 值搬进 .env，registry 只留变量名。"""
     reg, env = load_registry(), read_env()
@@ -805,6 +1094,7 @@ COMMANDS = [
     ("doctor", cmd_doctor, "环境体检（代理劫持 + 上游 tool calling 探测）"),
     ("sync", cmd_sync, "由 registry.json 重新生成配置"),
     ("migrate", cmd_migrate, "把 registry 里遗留的明文 header 值搬进 .env"),
+    ("export", cmd_export, "打离线包: lc export [--out 路径] [--no-images]"),
 ]
 
 

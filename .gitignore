@@ -14,6 +14,9 @@ codex/
 
 litellm/config.yaml
 
+# lc export 的产物：GB 级，且是搬运件而不是源码，不进版本库
+airgap-coder-*.tar.gz
+
 # 测试沙箱
 .smoke/
 
