@@ -62,7 +62,15 @@ jobs:
           # 生成方式：本地 `claude setup-token`（需要 Pro/Max 订阅）。
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          claude_args: "--model claude-opus-5"
+          # claude-code-action 默认只给文件操作和基础 GitHub 操作，**不允许执行
+          # 任意 Bash**。本 agent 全靠 gh / git / python3 干活，不放行的话所有
+          # 工具调用都会被拒（表现为 run 报 success 但什么都没做，日志里
+          # permission_denials_count 很高）。
+          # 这里直接放开 Bash：runner 是一次性的，真正的安全边界是上面 job
+          # 级别的 permissions 块限定的 GITHUB_TOKEN 权限范围。
+          claude_args: |
+            --model claude-opus-5
+            --allowedTools "Bash,Read,Write,Edit,Glob,Grep"
           prompt: |
             你是 airgap-coder 仓库 (LouisDM/airgap-coder) 的维护者，正在一次自动运行中处理 open issue。
             用中文回复所有 issue。
