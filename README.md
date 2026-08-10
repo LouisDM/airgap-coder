@@ -35,7 +35,7 @@ npm i -g @openai/codex@0.145.0      # 底座
 | `lc test [n]` | 协议层 5 项（含 tool calling 与 Responses 桥接） |
 | `lc e2e [n]` | 端到端：让 Codex 真改代码并校验结果 |
 | `lc code [...]` | 用当前上游启动 Codex |
-| `lc doctor` | 环境体检，含代理劫持检测 |
+| `lc doctor` | 环境体检：代理劫持、直连上游并断言 tool calling 真的生效 |
 | `lc sync` | 由 registry.json 重新生成配置 |
 
 ## 为什么需要 LiteLLM 网关
@@ -135,4 +135,6 @@ shell heredoc 写文件，转义容易出错。开启后稳定性明显改善。
 | `litellm/config.yaml`、`codex/*.toml` | 由 `lc sync` 生成，**gitignore** |
 | `docker/` | 隔离网开发镜像 |
 | `scripts/smoke.py` | 协议层 5 项测试 |
+| `scripts/probe.py` | tool calling 的探测请求与判据，`lc doctor` 与 smoke 共用 |
+| `scripts/test-doctor-probe.sh` | 用桩上游钉住 doctor 的探测判定，无需真实模型 |
 | `scripts/test-codex.sh` | 端到端测试 |
