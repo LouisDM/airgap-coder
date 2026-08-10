@@ -24,15 +24,32 @@ mkdir -p "$OUT"
 
 # 造出该被拦住的文件。它们都被 .gitignore 排除，所以 git ls-files 看不见；
 # 但这个测试的意义就在于不只依赖 gitignore 正确。
-cat > "$SRC/.env" <<'EOF'
-LITELLM_MASTER_KEY=sk-must-not-leak
-KEY_INTRANET=must-not-leak-either
+#
+# 哨兵值必须在运行时现生成，不能写死一个字面量：这个脚本自己就是被打包的源码
+# 之一，写死的字面量会跟着进包，于是下面那条「包的字节流里搜不到密钥」的断言
+# 会被脚本自身的内容触发，自己把自己判红。
+CANARY="lc-export-canary-$$-${RANDOM}${RANDOM}"
+
+cat > "$SRC/.env" <<EOF
+LITELLM_MASTER_KEY=sk-$CANARY
+KEY_INTRANET=$CANARY-too
 KEY_INTRANET_BASE=http://vllm.example.local:8000/v1
 EOF
 cp "$SRC/registry.example.json" "$SRC/registry.json"
 mkdir -p "$SRC/litellm" "$SRC/codex"
 echo "model_list: []" > "$SRC/litellm/config.yaml"
 echo "fake sqlite with prompts" > "$SRC/codex/sessions.sqlite"
+
+# 在 litellm 前面插一个诱饵服务：网关镜像必须按服务名定位，不能取第一条
+# `image:`。取错了会把不相干的镜像打进包，而这种错要到内网才发现。
+python3 - "$SRC/docker-compose.yml" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+open(p, "w", encoding="utf-8").write(
+    s.replace("services:\n",
+              "services:\n  decoy-proxy:\n    image: decoy/never-package-me:1.0\n", 1))
+PY
 
 fails=0
 check() {        # check assert|refute <字符串> <说明>；在 $LIST 里找
@@ -52,6 +69,9 @@ echo "[1] lc export --no-images：包的内容清单"
 NO_COLOR=1 python3 "$SRC/bin/lc" export --no-images --out "$OUT/bundle.tar.gz" \
   > "$OUT/log" 2>&1 || { cat "$OUT/log"; echo "::error::lc export 失败"; exit 1; }
 cat "$OUT/log"
+LIST="$OUT/log"
+check assert "ghcr.io/berriai/litellm" "网关镜像取自 docker-compose.yml 里的 litellm 服务"
+check refute "decoy/never-package-me"  "排在前面的诱饵服务没被误当成网关镜像"
 LIST="$OUT/list"
 tar tzf "$OUT/bundle.tar.gz" > "$LIST"
 
@@ -68,9 +88,10 @@ echo "[2] 不该带走的一个都不许在包里"
 # 里找到，那是该带走的文件。
 RELLIST="$OUT/rellist"
 sed 's|^[^/]*/||' "$LIST" > "$RELLIST"
-checkre() {      # checkre assert|refute <正则> <说明>
+LIST="$RELLIST"
+checkre() {      # checkre assert|refute <正则> <说明>；同样在 $LIST 里找
   local mode="$1" re="$2" why="$3" hit=0
-  grep -qE "$re" "$RELLIST" && hit=1
+  grep -qE "$re" "$LIST" && hit=1
   if { [ "$mode" = assert ] && [ "$hit" = 1 ]; } ||
      { [ "$mode" = refute ] && [ "$hit" = 0 ]; }; then
     echo "  ✅ $why"
@@ -87,7 +108,7 @@ checkre refute '^codex/'                "CODEX_HOME 不在包里（会话库可�
 checkre refute '^\.git/'                ".git 不在包里"
 checkre assert '^\.env\.example$'       ".env.example 该带走，没被上面的排除规则误伤"
 # 上面是按路径查，这里再按内容查一遍：密钥值绝不能出现在任何一个文件里
-if gunzip -c "$OUT/bundle.tar.gz" | grep -qa "must-not-leak"; then
+if gunzip -c "$OUT/bundle.tar.gz" | grep -qa "$CANARY"; then
   echo "  ❌ 包的字节流里出现了 .env 里的密钥值"
   echo "::error::包的字节流里出现了 .env 里的密钥值"
   fails=$((fails + 1))
@@ -126,10 +147,17 @@ fi
 # 带镜像那条路需要 docker。用一个极小的镜像替身：把副本里的 Dockerfile /
 # docker-compose.yml 改成指向它，就不用给生产代码开测试钩子，也不会碰到
 # 开发机上真实的 litellm 镜像 tag。
+#
+# 开发镜像的替身必须是 build 出来的，不能是 `docker tag hello-world ...`：
+# tag 只是加个别名，镜像仍带着 hello-world 的 RepoDigests，于是 MANIFEST 里
+# 「本地构建、没有 RepoDigest」那条兜底分支根本不会被走到。build 一层（哪怕
+# 只加个 LABEL）才会产生没有 RepoDigests 的镜像——这也正是真实开发镜像的样子。
+# 网关替身则用拉下来的 hello-world，它有 RepoDigest，走真实 digest 那条分支。
 # ─────────────────────────────────────────────────────────────────────────
 if command -v docker >/dev/null 2>&1 &&
    docker pull -q hello-world >/dev/null 2>&1 &&
-   docker tag hello-world airgap-coder:test-tiny >/dev/null 2>&1; then
+   printf 'FROM hello-world\nLABEL lc.test=1\n' |
+     docker build -q -t airgap-coder:test-tiny - >/dev/null 2>&1; then
   echo "[5] 带镜像导出（用 hello-world 当镜像替身）"
   sed -i.bak 's/^ARG CODEX_VERSION=.*/ARG CODEX_VERSION=test-tiny/' "$SRC/docker/Dockerfile"
   sed -i.bak 's#image: ghcr.io/berriai/litellm:main-stable#image: hello-world:latest#' \
@@ -150,9 +178,12 @@ if command -v docker >/dev/null 2>&1 &&
     || { echo "  ❌ SHA256SUMS 校验不过"; fails=$((fails + 1)); }
   LIST="$DIR2/MANIFEST.txt"
   check assert "sha256 :" "MANIFEST 记了每个镜像 tar 的 sha256"
-  # 拉下来的镜像有 RepoDigest，本地 tag 的没有——两条分支都要有话说，
-  # 不能出现空的 digest 行
-  check refute "digest : $" "digest 行不为空（本地构建的镜像也要有明确说明）"
+  check refute "decoy/never-package-me" "打进包的是 litellm 服务的镜像，不是诱饵"
+  # 两条 digest 分支都要有话说，且都不许留空。这里必须用正则：check 走的是
+  # grep -F，末尾的 $ 会被当成字面量，那条断言会永远为真。
+  check assert "digest : sha256:" "拉取来的网关镜像记了真实 digest"
+  check assert "无 RepoDigest"    "本地构建的镜像明确标注没有 digest，而不是留空"
+  checkre refute 'digest :[[:space:]]*$' "没有空的 digest 行"
   gunzip -c "$DIR2/images/litellm.tar.gz" | tar t >/dev/null \
     && echo "  ✅ 镜像 tar 是完整的 gzip+tar（流式落盘没写坏）" \
     || { echo "  ❌ 镜像 tar 坏了"; fails=$((fails + 1)); }

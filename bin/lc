@@ -783,13 +783,29 @@ BUNDLE_NEVER_DIRS = ("codex/", ".smoke/", ".git/")
 
 
 def _compose_litellm_image():
-    """docker-compose.yml 里 litellm 服务用的镜像（含 tag 或 digest）。"""
+    """docker-compose.yml 里 litellm 服务用的镜像（含 tag 或 digest）。
+
+    按服务名定位，不是取第一条 `image:`。compose 里将来多一个服务（比如加个
+    反向代理），「取第一条」会静默把错的镜像打进包，而这种错要到内网才发现。
+    定位不到就返回 None，让调用方明确报错——宁可打不出包，也不要打错包。
+    """
     f = ROOT / "docker-compose.yml"
     if not f.is_file():
         return None
+    service, svc_indent, in_services = None, None, False
     for line in f.read_text(encoding="utf-8").splitlines():
-        m = re.match(r"\s*image:\s*(\S+)", line)
-        if m:
+        if re.match(r"services:\s*$", line):
+            in_services = True
+            continue
+        if not in_services:
+            continue
+        m = re.match(r"(\s+)([A-Za-z0-9._-]+):\s*$", line)
+        if m and (svc_indent is None or len(m.group(1)) == svc_indent):
+            svc_indent = len(m.group(1))
+            service = m.group(2)
+            continue
+        m = re.match(r"\s+image:\s*(\S+)", line)
+        if m and service == "litellm":
             return m.group(1).strip().strip('"').strip("'")
     return None
 
