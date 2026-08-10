@@ -22,7 +22,12 @@ npm i -g @openai/codex@0.145.0      # 底座
 ```
 
 `lc init` 会问你上游地址、API Key、模型 ID、上下文大小，以及后端类型（决定
-关闭思考模式该用哪个参数名）。密钥只写进 `.env`（已 gitignore）。
+关闭思考模式该用哪个参数名）。地址、密钥、自定义 HTTP 头的值都只写进 `.env`
+（已 gitignore），`registry.json` 里只留变量名。
+
+**团队里已经有人配好过？** 拿到对方的 `registry.json` 放进仓库根目录再跑
+`lc init`，它会认出已有上游，只问你自己的地址和密钥，模型 ID / 上下文窗口 /
+关思考模式的参数名这些结构参数直接沿用，不用重新踩一遍坑。
 
 ## 命令
 
@@ -37,6 +42,7 @@ npm i -g @openai/codex@0.145.0      # 底座
 | `lc code [...]` | 用当前上游启动 Codex |
 | `lc doctor` | 环境体检：代理劫持、直连上游并断言 tool calling 真的生效 |
 | `lc sync` | 由 registry.json 重新生成配置 |
+| `lc migrate` | 把 registry 里遗留的明文 HTTP 头值搬进 `.env` |
 
 ## 为什么需要 LiteLLM 网关
 
@@ -130,8 +136,8 @@ shell heredoc 写文件，转义容易出错。开启后稳定性明显改善。
 | 路径 | 说明 |
 |---|---|
 | `bin/lc` | 配置与运维 CLI（无第三方依赖） |
-| `registry.json` | 上游注册表，**gitignore**；模板见 `registry.example.json` |
-| `.env` | 密钥，**gitignore** |
+| `registry.json` | 上游注册表，只存结构定义与变量名（不含地址/密钥）；目前仍 **gitignore**，见 [#4](https://github.com/LouisDM/airgap-coder/issues/4) |
+| `.env` | 地址与密钥，**gitignore** |
 | `litellm/config.yaml`、`codex/*.toml` | 由 `lc sync` 生成，**gitignore** |
 | `docker/` | 隔离网开发镜像 |
 | `scripts/smoke.py` | 协议层 5 项测试 |

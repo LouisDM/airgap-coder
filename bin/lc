@@ -14,8 +14,10 @@
     lc code [args...]    用当前上游启动 Codex
     lc doctor            环境体检
     lc sync              由注册表重新生成 litellm/codex 配置
+    lc migrate           把 registry 里遗留的明文 header 值搬进 .env
 
-真实密钥只写入 .env（已 gitignore）；registry.json 只存非敏感信息，可以提交。
+真实密钥只写入 .env（已 gitignore）；registry.json 只存非敏感信息，可以提交：
+地址、API Key、自定义 HTTP 头的值都只留变量名，实际值在 .env 里。
 """
 from __future__ import print_function
 
@@ -91,8 +93,33 @@ def write_env(d):
         pass
 
 
+ENV_PREFIX = "KEY_"
+
+
 def env_key_name(name):
-    return "KEY_" + re.sub(r"[^A-Z0-9]", "_", name.upper())
+    return ENV_PREFIX + re.sub(r"[^A-Z0-9]", "_", name.upper())
+
+
+def env_header_name(upstream, header):
+    """自定义 HTTP 头的值也走 .env，registry 里只留变量名。
+
+    registry.json 是可提交的，而 headers 字段没有任何约束——用户完全可能往里
+    塞 Authorization 或某个网关的自定义 token。把值挪进 .env，处理方式就和
+    api_key / api_base 一致了。头名里的连字符（User-Agent）要转成下划线，
+    否则不是合法的环境变量名。
+    """
+    return "%s_HEADER_%s" % (env_key_name(upstream),
+                             re.sub(r"[^A-Z0-9]", "_", str(header).upper()))
+
+
+def is_env_ref(v):
+    """registry 里这个 header 值是变量名引用，还是早期版本留下的明文？"""
+    return isinstance(v, str) and v.startswith(ENV_PREFIX)
+
+
+def legacy_headers(u):
+    """该上游 registry 里仍然是明文的 header 名。"""
+    return sorted(k for k, v in (u.get("headers") or {}).items() if not is_env_ref(v))
 
 
 # ---------------------------------------------------------------- prompts
@@ -118,7 +145,12 @@ def ask(label, default=None, secret=False, required=True):
 
 def ask_bool(label, default=True):
     d = "Y/n" if default else "y/N"
-    v = input("%s%s%s %s[%s]%s: " % (C["b"], label, C["x"], C["d"], d, C["x"])).strip().lower()
+    try:
+        v = input("%s%s%s %s[%s]%s: "
+                  % (C["b"], label, C["x"], C["d"], d, C["x"])).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        say()
+        die("已取消", 130)
     if not v:
         return default
     return v in ("y", "yes", "是")
@@ -154,9 +186,17 @@ def gen_litellm(reg):
         L.append("      api_key: os.environ/%s" % (u["env_key"]))
         L.append("      use_chat_completions_api: true")
         if u.get("headers"):
+            # header 的值和 api_key 一样走 os.environ/：registry 只存变量名。
+            # LiteLLM 加载配置时会递归展开嵌套 dict 里的 os.environ/ 引用
+            # （proxy_server.ProxyConfig._check_for_os_environ_vars），所以
+            # extra_headers 里这么写是生效的。
             L.append("      extra_headers:")
             for k, v in sorted(u["headers"].items()):
-                L.append("        %s: \"%s\"" % (k, v))
+                if is_env_ref(v):
+                    L.append("        %s: os.environ/%s" % (k, v))
+                else:
+                    # 早期版本把值明文存在 registry 里，兼容读取；`lc migrate` 可搬走。
+                    L.append("        %s: \"%s\"" % (k, v))
         # 额外参数扁平写进 litellm_params，LiteLLM 会原样转发给上游。
         # 实测扁平写法与 extra_body 包一层都生效，扁平的对两种命名约定都适用。
         if u.get("params"):
@@ -242,9 +282,29 @@ def sync(reg=None, quiet=False):
         die("还没有任何上游，先跑 `lc add`")
     gen_litellm(reg)
     gen_codex(reg)
+    warn_legacy_headers(reg)
     if not quiet:
         ok("已生成 litellm/config.yaml 与 codex/*.config.toml (%d 个上游)"
            % len(reg["upstreams"]))
+
+
+def warn_legacy_headers(reg):
+    """registry 里还有明文 header 值时提醒。
+
+    不在 sync 里静默迁移：sync 被 `lc up` / `lc use` / `lc rm` 隐式调用，
+    它应该是「registry -> 配置」的纯生成器；让它顺手改写 registry 和 .env，
+    等于 `lc up` 会悄悄动你的凭证文件。所以只警告，搬运交给显式的 lc migrate。
+    这条警告无视 quiet，因为它说的是泄漏面。
+    """
+    stale = [(n, legacy_headers(reg["upstreams"][n])) for n in sorted(reg["upstreams"])]
+    stale = [(n, ks) for n, ks in stale if ks]
+    if not stale:
+        return
+    warn("registry.json 里还有明文 header 值：")
+    for n, ks in stale:
+        say("   %s: %s" % (n, ", ".join(ks)))
+    say("   %sregistry.json 是可提交的，header 值应当只存在 .env 里。"
+        "跑 `lc migrate` 搬运。%s" % (C["d"], C["x"]))
 
 
 # ---------------------------------------------------------------- docker
@@ -291,12 +351,24 @@ def cmd_init(argv):
     write_env(env)
     save_registry(reg)
 
-    say()
-    say("接下来添加模型上游。内网 vLLM 直接填它的 /v1 地址。")
-    while True:
+    if reg["upstreams"]:
+        # 团队场景：registry.json 随仓库下发，结构参数（模型 ID、上下文窗口、
+        # 关思考模式的参数名）对所有人都一样，只有地址和密钥因人而异。
+        # 新人不该被迫重新踩一遍结构参数的坑，所以这里只补 .env 里缺的那部分。
+        say()
+        ok("检测到已有 registry.json（%d 个上游），结构参数直接沿用。" % len(reg["upstreams"]))
+        say("只需要填你本机的地址与密钥——这两样只写进 .env。")
+        for name in sorted(reg["upstreams"]):
+            _fill_secrets(name, reg["upstreams"][name], env)
+        write_env(env)
+        more = ask_bool("再添加一个新上游?", False)
+    else:
+        say()
+        say("接下来添加模型上游。内网 vLLM 直接填它的 /v1 地址。")
+        more = True
+    while more:
         _add_one(reg, env)
-        if not ask_bool("再加一个上游?", False):
-            break
+        more = ask_bool("再加一个上游?", False)
     if not reg.get("default"):
         reg["default"] = sorted(reg["upstreams"])[0]
     save_registry(reg)
@@ -307,15 +379,32 @@ def cmd_init(argv):
     say("下一步: %slc up%s  然后  %slc test%s" % (C["B"], C["x"], C["B"], C["x"]))
 
 
+def _ask_base(label, default=None):
+    base = ask(label, default).rstrip("/")
+    if not base.endswith("/v1"):
+        warn("地址通常以 /v1 结尾，你填的是: %s" % base)
+    return base
+
+
+def _fill_secrets(name, u, env):
+    """已有上游：只问 .env 里那几项（地址、key、header 值），不重问结构参数。"""
+    head("上游 '%s'  %s(model=%s ctx=%d)%s"
+         % (name, C["d"], u["model"], u["context_window"], C["x"]))
+    env[u["env_base"]] = _ask_base("Base URL（到 /v1 为止）", env.get(u["env_base"]) or None)
+    env[u["env_key"]] = ask("API Key", env.get(u["env_key"]) or None, secret=True)
+    for hk in sorted(u.get("headers") or {}):
+        ref = u["headers"][hk]
+        if not is_env_ref(ref):
+            continue  # 明文遗留值，归 lc migrate 管，这里不动
+        env[ref] = ask("  HTTP 头 %s 的值" % hk, env.get(ref) or None)
+
+
 def _add_one(reg, env):
     head("添加上游")
     name = ask("名称（英文，用作 profile 名，如 intranet-32b）")
     if name in reg["upstreams"] and not ask_bool("'%s' 已存在，覆盖?" % name, False):
         return
-    base = ask("Base URL（到 /v1 为止，如 https://host:13207/member1/qwen3-32b/v1）")
-    base = base.rstrip("/")
-    if not base.endswith("/v1"):
-        warn("地址通常以 /v1 结尾，你填的是: %s" % base)
+    base = _ask_base("Base URL（到 /v1 为止，如 https://your-intranet.local:8000/v1）")
     model = ask("上游模型 ID（发给后端的 model 字段，如 qwen3-32b）")
     key = ask("API Key", secret=True)
     ctx = ask_int("上下文窗口 (tokens)", 131072)
@@ -342,7 +431,9 @@ def _add_one(reg, env):
             hk = ask("头名称（留空结束）", required=False)
             if not hk:
                 break
-            headers[hk] = ask("  %s 的值" % hk)
+            hn = env_header_name(name, hk)
+            env[hn] = ask("  %s 的值 %s(存入 .env/%s)%s" % (hk, C["d"], hn, C["x"]))
+            headers[hk] = hn
 
     ek, eb = env_key_name(name), env_key_name(name) + "_BASE"
     env[ek] = key
@@ -410,6 +501,9 @@ def cmd_rm(argv):
         die("没有上游 '%s'" % argv[0])
     env.pop(u["env_key"], None)
     env.pop(u["env_base"], None)
+    for ref in (u.get("headers") or {}).values():
+        if is_env_ref(ref):
+            env.pop(ref, None)
     if reg.get("default") == argv[0]:
         reg["default"] = sorted(reg["upstreams"])[0] if reg["upstreams"] else None
     save_registry(reg)
@@ -509,6 +603,7 @@ def cmd_doctor(argv):
         err("没有配置上游")
     else:
         ok("%d 个上游，默认 %s" % (len(reg["upstreams"]), reg.get("default")))
+        warn_legacy_headers(reg)
 
     if gw_alive(reg):
         ok("网关存活 %s" % gw_url(reg))
@@ -548,7 +643,11 @@ def _probe_upstream(name, u, env):
     # 否则 doctor 打出去的请求和网关实际发出的请求不是同一个配置，
     # 探测结论迁移不到真实链路上。
     for k, v in (u.get("headers") or {}).items():
-        headers[str(k)] = str(v)
+        hv = env.get(v) if is_env_ref(v) else v
+        if not hv:
+            err("%s: .env 里没有 %s（HTTP 头 %s 的值），跑 `lc init` 补上" % (name, v, k))
+            return
+        headers[str(k)] = str(hv)
     payload = probe.chat_payload(u["model"], u.get("params"))
 
     req = urllib.request.Request(base + "/chat/completions",
@@ -607,6 +706,30 @@ def cmd_sync(argv):
     sync()
 
 
+def cmd_migrate(argv):
+    """把 registry 里遗留的明文 header 值搬进 .env，registry 只留变量名。"""
+    reg, env = load_registry(), read_env()
+    moved = 0
+    for name in sorted(reg["upstreams"]):
+        u = reg["upstreams"][name]
+        for hk in legacy_headers(u):
+            var = env_header_name(name, hk)
+            env[var] = u["headers"][hk]
+            u["headers"][hk] = var
+            say("  %s: HTTP 头 %s 的值 -> .env/%s" % (name, hk, var))
+            moved += 1
+    if not moved:
+        ok("没有需要迁移的明文 header 值")
+        return
+    save_registry(reg)
+    write_env(env)
+    if reg["upstreams"]:
+        sync(reg, quiet=True)
+    ok("已迁移 %d 个 header 值，registry.json 里只剩变量名" % moved)
+    warn("这些值之前是明文写在 registry.json 里的。如果它曾经被提交过，"
+         "对应凭证应当视为已泄漏，请轮换。")
+
+
 COMMANDS = [
     ("init", cmd_init, "交互式初始化（生成 master key、添加上游）"),
     ("add", cmd_add, "交互式添加一个上游"),
@@ -622,6 +745,7 @@ COMMANDS = [
     ("code", cmd_code, "用当前上游启动 Codex: lc code [codex 参数]"),
     ("doctor", cmd_doctor, "环境体检（代理劫持 + 上游 tool calling 探测）"),
     ("sync", cmd_sync, "由 registry.json 重新生成配置"),
+    ("migrate", cmd_migrate, "把 registry 里遗留的明文 header 值搬进 .env"),
 ]
 
 
