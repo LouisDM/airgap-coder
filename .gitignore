@@ -1,10 +1,10 @@
 # ── 密钥，绝不提交 ──────────────────────────────────
 .env
 
-# 站点特定的上游注册表（由 lc 生成）。它本身不含地址也不含密钥——那些只在 .env
-# 里，registry 只存变量名。issue #4 计划把它改成可提交（团队共享结构定义），
-# 但 ci.yml 里还有一条「registry.json 必须被 gitignore」的断言，得先一起改。
-registry.json
+# registry.json 刻意不在这里：issue #4 之后它只存结构定义与变量名，地址和密钥
+# 都在 .env 里。团队把它提交上来，新人 clone 后只需写自己的 .env，不用重跑一遍
+# lc init 逐项填 model / context window / 后端类型。
+# ci.yml 里有一条断言守着这个前提：registry.json 里出现任何 URL 或疑似密钥就变红。
 
 # ── 生成物 ────────────────────────────────────────
 # codex/ 是 CODEX_HOME，内容全部由 `lc sync` 生成或 Codex 运行时产生

@@ -75,14 +75,46 @@ jobs:
           grep -q 'model_context_window' codex/intranet.config.toml \
             || { echo "::error::缺上下文预算声明"; exit 1; }
 
-      - name: 确认敏感文件不会被提交
+      - name: registry.json 可提交，但必须不含任何机密
+        # issue #4 的门禁。registry.json 现在是团队共享的结构定义，会被提交，
+        # 所以「它里面没有地址也没有密钥」从一个约定变成了必须守住的不变量：
+        # 一旦 lc 把某个值直接写进 registry 而不是写成变量名，就是泄漏。
         run: |
           set -euo pipefail
-          # 上一步刻意造了 .env 和 registry.json，它们必须被 gitignore 拦住
-          for f in .env registry.json; do
-            git check-ignore -q "$f" \
-              || { echo "::error::$f 没有被 .gitignore 排除，有泄漏风险"; exit 1; }
-          done
+          python3 - <<'PYCHK'
+          import json, re, sys
+          reg = json.load(open("registry.json"))
+          bad = []
+          def walk(node, path):
+              if isinstance(node, dict):
+                  for k, v in node.items():
+                      walk(v, path + "." + str(k))
+              elif isinstance(node, list):
+                  for i, v in enumerate(node):
+                      walk(v, "%s[%d]" % (path, i))
+              elif isinstance(node, str):
+                  if re.search(r"https?://", node):
+                      bad.append((path, node, "出现了 URL —— 地址应该只在 .env 里"))
+                  elif re.match(r"^(sk|gho|ghp|github_pat)[-_]", node):
+                      bad.append((path, node[:12] + "...", "疑似密钥"))
+                  elif len(node) >= 32 and re.match(r"^[A-Za-z0-9_\-]+$", node) \
+                       and not node.startswith("KEY_"):
+                      bad.append((path, node[:12] + "...", "疑似密钥（长随机串且不是 KEY_ 变量名）"))
+          walk(reg, "registry")
+          for p, v, why in bad:
+              print("::error::%s = %r —— %s" % (p, v, why))
+          sys.exit(1 if bad else 0)
+          PYCHK
+          echo "✅ registry.json 只含结构定义与变量名"
+
+      - name: .env 必须被 gitignore，且工作区无残留
+        run: |
+          set -euo pipefail
+          git check-ignore -q .env \
+            || { echo "::error::.env 没有被 .gitignore 排除，密钥会泄漏"; exit 1; }
+          # registry.json 现在是可提交文件，前面步骤造的那份是测试用的假数据，
+          # 不能留在工作区冒充真配置
+          rm -f registry.json .env
           test -z "$(git status --porcelain --untracked-files=normal)" \
             || { echo "::error::生成物污染了工作区，说明有文件没被 gitignore:"; git status --short; exit 1; }
 
