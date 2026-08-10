@@ -28,7 +28,7 @@ jobs:
         run: python3 -m py_compile bin/lc scripts/smoke.py scripts/probe.py
 
       - name: Shell 语法检查
-        run: bash -n scripts/test-codex.sh docker/entrypoint.sh scripts/smoke.sh scripts/test-doctor-probe.sh
+        run: bash -n scripts/test-codex.sh docker/entrypoint.sh scripts/smoke.sh scripts/test-doctor-probe.sh scripts/test-export.sh
 
       - name: CLI 可执行
         run: |
@@ -39,6 +39,12 @@ jobs:
         # issue #1 的门禁：桩上游按 7 种方式作答，断言 doctor 每个判定分支。
         # 没有这条，「只测连通性测不出 tool calling」这个问题会悄悄回归。
         run: bash scripts/test-doctor-probe.sh
+
+      - name: lc export 的包内容校验
+        # issue #5 的门禁。这个包是唯一一次跨隔离网传递，到了内网没有补救手段，
+        # 所以重点断言 .env / registry.json / 生成物 / 会话库一个都没进包，
+        # 并真跑一遍 install.sh。
+        run: bash scripts/test-export.sh
 
       - name: 配置生成器输出校验
         run: |

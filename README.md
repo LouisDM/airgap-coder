@@ -43,6 +43,7 @@ npm i -g @openai/codex@0.145.0      # 底座
 | `lc doctor` | 环境体检：代理劫持、直连上游并断言 tool calling 真的生效 |
 | `lc sync` | 由 registry.json 重新生成配置 |
 | `lc migrate` | 把 registry 里遗留的明文 HTTP 头值搬进 `.env` |
+| `lc export` | 打一个可搬运进内网的自包含离线包 |
 
 ## 为什么需要 LiteLLM 网关
 
@@ -57,14 +58,33 @@ Responses 协议（[讨论](https://github.com/openai/codex/discussions/7782)）
 
 ## 上线内网
 
-1. 有外网的机器上导出两个镜像：
+这是整个流程里唯一一次真正的隔离网穿越——到了内网就没有外网可以补救，所以
+用一条命令打包，别手抄。
+
+1. 有外网的机器上准备好两个镜像，然后打包：
    ```bash
    docker build -t airgap-coder:0.145.0 -f docker/Dockerfile .
-   docker save airgap-coder:0.145.0 | gzip > airgap-coder.tar.gz
    docker pull ghcr.io/berriai/litellm:main-stable
-   docker save ghcr.io/berriai/litellm:main-stable | gzip > litellm.tar.gz
+   ./bin/lc export                    # -> airgap-coder-0.145.0-<时间戳>.tar.gz
    ```
-2. 内网起网关：`lc init` 填内网地址 → `lc up`
+   包里是：两个镜像的 tar、仓库源码（`git ls-files`，不含 `.env` /
+   `registry.json` / 生成物）、`install.sh`、`MANIFEST.txt`（镜像名、
+   **digest**、sha256、导出时间）、`SHA256SUMS`。镜像版本从
+   `docker/Dockerfile` 的 `ARG CODEX_VERSION` 和 `docker-compose.yml` 读，
+   不写死。只更新源码、镜像没变时加 `--no-images`（包会小几个 G）。
+
+   `MANIFEST.txt` 记的是 digest 而不只是 tag：`main-stable` 是移动 tag，
+   两次 `docker pull` 可能拿到不同镜像却写着同一个版本号，而内网侧没有外网
+   可以回溯。核对完整性时以 digest 为准。
+
+2. 把那一个 tar.gz 搬进内网，解包后：
+   ```bash
+   tar xzf airgap-coder-0.145.0-<时间戳>.tar.gz && cd airgap-coder-0.145.0-<时间戳>
+   ./install.sh        # 校验 sha256 → docker load 两个镜像
+   ./bin/lc init       # 填内网网关地址与你的 API Key
+   ./bin/lc up         # 起网关
+   ./bin/lc doctor     # 体检：连通性 + tool calling 真的生效
+   ```
 3. 开发机跑容器：
    ```bash
    docker run -it --rm -v "$PWD:/workspace" \
@@ -143,4 +163,5 @@ shell heredoc 写文件，转义容易出错。开启后稳定性明显改善。
 | `scripts/smoke.py` | 协议层 5 项测试 |
 | `scripts/probe.py` | tool calling 的探测请求与判据，`lc doctor` 与 smoke 共用 |
 | `scripts/test-doctor-probe.sh` | 用桩上游钉住 doctor 的探测判定，无需真实模型 |
+| `scripts/test-export.sh` | 钉住 `lc export` 的包内容，重点是敏感文件一个都不许进包 |
 | `scripts/test-codex.sh` | 端到端测试 |

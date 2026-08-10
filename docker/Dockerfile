@@ -2,12 +2,10 @@
 #
 # 构建（在有外网的机器上做一次，产物导出带进内网）：
 #   docker build -t airgap-coder:0.145.0 -f docker/Dockerfile .
-#   docker save airgap-coder:0.145.0 | gzip > airgap-coder.tar.gz
 #   docker pull ghcr.io/berriai/litellm:main-stable
-#   docker save ghcr.io/berriai/litellm:main-stable | gzip > litellm.tar.gz
+#   ./bin/lc export      # 两个镜像 + 源码 + install.sh + MANIFEST 打成一个包
 #
-# 内网使用：
-#   docker load < airgap-coder.tar.gz
+# 内网使用（解包后跑 ./install.sh 会自动 docker load）：
 #   docker run -it --rm -v "$PWD:/workspace" \
 #     -e GATEWAY_URL=http://gateway.your-intranet:4000/v1 \
 #     -e GATEWAY_KEY=xxx \
