@@ -99,7 +99,10 @@ jobs:
             2. 跳过已经有你的分析评论、且此后没有新用户评论的 issue（不要重复刷屏）。
             3. 对每个待处理 issue：读代码定位根因，在 issue 下用中文留一条评论，说清根因、影响范围、
                修复方案。打上合适标签（bug / enhancement / question / documentation）。
-            4. **能修的直接修并合并**：
+            4. **能修的直接修并合并**。注意 main 已开启分支保护：
+               禁止直推、禁止 force push，`static` 和 `docker` 两个检查必须通过才能合并。
+               你**不可能**绕过它——不要尝试直接 `git push origin main`，那会被 GitHub 拒绝。
+               唯一路径是分支 → PR → 触发 CI → 绿灯后合并。
                - 建分支 `fix/issue-<号>` 或 `feat/issue-<号>`，改动只针对该 issue，不夹带无关重构。
                - 先跑本地静态验证（见下），通过后开 PR，描述里写清改了什么、为什么、怎么验证的，
                  并写 `Closes #<号>`。
