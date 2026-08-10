@@ -64,6 +64,12 @@ jobs:
           git config user.email "issue-agent@users.noreply.github.com"
 
       - uses: anthropics/claude-code-action@v1
+        env:
+          # 发评论专用：GITHUB_TOKEN 身份是 github-actions[bot]，评论会明确
+          # 标为机器人。PAT 属主是维护者本人，用它发评论会让 agent 的发言和
+          # 维护者的发言在 GitHub 上完全无法区分 —— 实测连 agent 自己都分不清
+          # 哪条是它发的，差点拿一条自己写的「可以合并了」当人工审核通过。
+          BOT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           # 用订阅的 OAuth token 而非 ANTHROPIC_API_KEY：后者走 console 的按量
           # 付费，和订阅是两套账，会产生额外账单。前者消耗订阅自身的用量额度。
@@ -164,6 +170,25 @@ jobs:
             - 本地无法跑真实模型测试（scripts/smoke.py 和 test-codex.sh 需要活的网关和 API Key），
               不要尝试，也不要因此认为验证失败。
             - 最终以 GitHub Actions 的 CI 结果为准。
+
+            ## 身份约束（重要，这条被违反过一次）
+
+            本 job 的默认 `GH_TOKEN` 是维护者本人的 PAT。用它发评论，你的发言会
+            显示成 @LouisDM 本人说的，和真人审核意见混在一起 —— 上一轮就发生过：
+            你把自己写的「可以合并了」误认成人工审核，差点据此合并。
+
+            所以：
+
+            - **发任何评论（issue / PR / review）一律用 bot 身份**：
+              `GH_TOKEN=$BOT_TOKEN gh issue comment ...`
+              `GH_TOKEN=$BOT_TOKEN gh pr comment ...`
+              这样评论会显示为 github-actions[bot]。
+            - **每条评论开头必须带一行** `> 🤖 由 issue-agent 自动发布` —— 双保险，
+              万一 token 用错了，读的人也能一眼看出来。
+            - 推分支、开 PR、合并、触发 CI 用默认 PAT（那是为了让 CI 正常触发）。
+            - **绝不把任何显示为 @LouisDM 的评论当作人工审核**。真人审核的标志是
+              PR 上的 Approve review，或维护者在评论里明确写「我看过了」。
+              拿不准就当作没有人审核过。
 
             ## 硬性约束
 
