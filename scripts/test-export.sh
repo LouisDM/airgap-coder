@@ -182,7 +182,17 @@ if command -v docker >/dev/null 2>&1 &&
   # 两条 digest 分支都要有话说，且都不许留空。这里必须用正则：check 走的是
   # grep -F，末尾的 $ 会被当成字面量，那条断言会永远为真。
   check assert "digest : sha256:" "拉取来的网关镜像记了真实 digest"
-  check assert "无 RepoDigest"    "本地构建的镜像明确标注没有 digest，而不是留空"
+  # 本地构建的镜像有没有 RepoDigest 取决于镜像存储驱动：经典 docker（GitHub
+  # runner）没有，containerd snapshotter（Docker Desktop 新默认）有。断言
+  # 「必须写着无 RepoDigest」会在开发机上误报——那是环境差异，不是缺陷。
+  # 真正要保证的是每条 digest 都有话说：要么真 digest，要么明确标注没有。
+  if grep -E 'digest :' "$LIST" | grep -qvE 'digest :[[:space:]]*(sha256:|\(本地构建)'; then
+    echo "  ❌ 有 digest 行既不是真 digest 也没明确标注"
+    echo "::error::有 digest 行既不是真 digest 也没明确标注"
+    fails=$((fails + 1))
+  else
+    echo "  ✅ 每条 digest 要么是真 digest，要么明确标注本地构建"
+  fi
   checkre refute 'digest :[[:space:]]*$' "没有空的 digest 行"
   gunzip -c "$DIR2/images/litellm.tar.gz" | tar t >/dev/null \
     && echo "  ✅ 镜像 tar 是完整的 gzip+tar（流式落盘没写坏）" \
