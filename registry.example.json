@@ -1,5 +1,5 @@
 {
-  "_comment": "上游注册表示例。真实的 registry.json 由 `lc init` / `lc add` 生成并被 gitignore（含站点特定地址）。密钥永远只在 .env 里，此文件不含密钥。",
+  "_comment": "上游注册表示例。真实的 registry.json 由 `lc init` / `lc add` 生成。它只存结构定义与变量名：地址在 .env 的 env_base 变量里、密钥在 env_key 里、自定义 HTTP 头的值在 KEY_<上游>_HEADER_<头名> 里。此文件不含任何地址或凭证。",
   "default": "intranet",
   "gateway_port": 4000,
   "upstreams": {
