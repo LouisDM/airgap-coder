@@ -41,6 +41,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # 用 PAT 而非 GITHUB_TOKEN 推分支：GITHUB_TOKEN 推的分支/开的 PR
+          # 会被判为 first_time_contributor，CI 挂在 action_required 等人工批准，
+          # 而 GITHUB_TOKEN 又批不了自己触发的 run —— agent 只能干等到超时。
+          # PAT 身份下 CI 正常自动触发。未配置时回退，工作流仍可跑（只是会卡审批）。
+          token: ${{ secrets.AGENT_PAT || secrets.GITHUB_TOKEN }}
 
       - name: 校验 secret 已配置
         env:
@@ -64,7 +69,7 @@ jobs:
           # 付费，和订阅是两套账，会产生额外账单。前者消耗订阅自身的用量额度。
           # 生成方式：本地 `claude setup-token`（需要 Pro/Max 订阅）。
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ secrets.AGENT_PAT || secrets.GITHUB_TOKEN }}
           # claude-code-action 默认只给文件操作和基础 GitHub 操作，**不允许执行
           # 任意 Bash**。本 agent 全靠 gh / git / python3 干活，不放行的话所有
           # 工具调用都会被拒（表现为 run 报 success 但什么都没做，日志里
@@ -118,7 +123,14 @@ jobs:
                  gh run watch <上一步拿到的 id> --exit-status
                  ```
                  看到 CI 全绿才合并（`gh pr merge --squash --delete-branch`）。
-               - CI 未通过、或改动是 CI 覆盖不到的，**不要合并**，留 PR 等人工审核，并在 issue 里说明卡在哪。
+               - **合并前必须自问：这次改动的行为，CI 里有断言钉住吗？**
+                 「CI 全绿」只说明没破坏既有断言，不等于新代码被验证过。
+                 新增或修改了某个函数的行为，而 `ci.yml` 里没有任何一条断言会因为
+                 这个行为出错而变红 —— 那就是没有覆盖，**不要合并**。
+                 留 PR 等人工审核，在 issue 和 PR 里都说明差哪条断言。
+                 你推不了 `.github/`，但可以把测试脚本写进 `scripts/`，
+                 并在 PR 描述里列出 `ci.yml` 需要加的那几行，由人工补。
+               - CI 未通过的，同样不要合并。
             5. **处理 open PR**（包括外部贡献者提的）：
                `gh pr list --state open --json number,author,title,headRefName,files,isCrossRepository`
                跳过你自己上轮已 review 过、且此后没有新 commit 的 PR。
