@@ -136,4 +136,5 @@ shell heredoc 写文件，转义容易出错。开启后稳定性明显改善。
 | `docker/` | 隔离网开发镜像 |
 | `scripts/smoke.py` | 协议层 5 项测试 |
 | `scripts/probe.py` | tool calling 的探测请求与判据，`lc doctor` 与 smoke 共用 |
+| `scripts/test-doctor-probe.sh` | 用桩上游钉住 doctor 的探测判定，无需真实模型 |
 | `scripts/test-codex.sh` | 端到端测试 |
