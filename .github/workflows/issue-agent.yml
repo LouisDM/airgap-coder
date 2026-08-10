@@ -42,10 +42,11 @@ jobs:
       - name: 校验 secret 已配置
         env:
           # 经 env 传入而非直接内插进 shell，避免把 secret 拼进脚本文本
-          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
-          if [ -z "$KEY" ]; then
-            echo "::error::缺少 ANTHROPIC_API_KEY secret。到 Settings → Secrets and variables → Actions 添加。"
+          if [ -z "$TOKEN" ]; then
+            echo "::error::缺少 CLAUDE_CODE_OAUTH_TOKEN。本地跑 \`claude setup-token\` 生成，"
+            echo "::error::再到 Settings → Secrets and variables → Actions 添加同名 secret。"
             exit 1
           fi
 
@@ -56,7 +57,10 @@ jobs:
 
       - uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # 用订阅的 OAuth token 而非 ANTHROPIC_API_KEY：后者走 console 的按量
+          # 付费，和订阅是两套账，会产生额外账单。前者消耗订阅自身的用量额度。
+          # 生成方式：本地 `claude setup-token`（需要 Pro/Max 订阅）。
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           claude_args: "--model claude-opus-5"
           prompt: |
