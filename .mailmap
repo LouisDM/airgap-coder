@@ -1,0 +1,14 @@
+# 统一提交身份。
+#
+# 为什么需要这个文件：issue-agent 合并 PR 时，squash commit 的作者由 GitHub
+# 决定，会是开 PR 的那个 App 身份（github-actions[bot]），workflow 里配的
+# git user.name/email 管不到它。历史可以重写，但新产生的还会是那个身份。
+#
+# .mailmap 让 `git log --use-mailmap`、`git shortlog` 和 GitHub 的贡献者
+# 统计显示统一身份。注意 GitHub 的 commit 列表页不套用 mailmap，那里仍会
+# 显示 github-actions[bot]——这是平台行为，改不了。
+
+Louis Gu <893592495@qq.com>
+issue-agent[bot] <issue-agent@users.noreply.github.com> <41898282+github-actions[bot]@users.noreply.github.com>
+issue-agent[bot] <issue-agent@users.noreply.github.com> <41898282+claude[bot]@users.noreply.github.com>
+issue-agent[bot] <issue-agent@users.noreply.github.com> github-actions[bot] <noreply@github.com>
