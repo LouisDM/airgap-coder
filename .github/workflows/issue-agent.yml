@@ -1,0 +1,135 @@
+name: Issue Agent
+
+# 每 12 小时自动处理 open issue：分析、评论、能修的开 PR 并在 CI 全绿后合并。
+# UTC 04:07 / 16:07 = 香港时间 12:07 / 00:07。
+# 也可以在 Actions 页面手动触发（workflow_dispatch）立即跑一轮。
+
+on:
+  schedule:
+    - cron: "7 4,16 * * *"
+  workflow_dispatch:
+    inputs:
+      issue_numbers:
+        description: "只处理指定 issue（逗号分隔，如 1,2,3）；留空则处理全部 open issue"
+        required: false
+        default: ""
+      dry_run:
+        description: "只分析和评论，不开 PR 不合并"
+        type: boolean
+        required: false
+        default: false
+
+# 同一时间只跑一个，避免手动触发和定时任务撞车导致重复开 PR
+concurrency:
+  group: issue-agent
+  cancel-in-progress: false
+
+jobs:
+  process-issues:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write        # 推分支、合并
+      issues: write          # 评论、打标签
+      pull-requests: write   # 开 PR、合并
+      actions: write         # 触发 CI（见下方 prompt 里的说明）
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 校验 secret 已配置
+        env:
+          # 经 env 传入而非直接内插进 shell，避免把 secret 拼进脚本文本
+          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::缺少 ANTHROPIC_API_KEY secret。到 Settings → Secrets and variables → Actions 添加。"
+            exit 1
+          fi
+
+      - name: 配置 git 身份
+        run: |
+          git config user.name  "issue-agent[bot]"
+          git config user.email "issue-agent@users.noreply.github.com"
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          claude_args: "--model claude-opus-5"
+          prompt: |
+            你是 airgap-coder 仓库 (LouisDM/airgap-coder) 的维护者，正在一次自动运行中处理 open issue。
+            用中文回复所有 issue。
+
+            本次范围：${{ github.event.inputs.issue_numbers && format('只处理 issue {0}', github.event.inputs.issue_numbers) || '所有 open issue' }}
+            ${{ github.event.inputs.dry_run == 'true' && '本次是 DRY RUN：只分析和评论，禁止开 PR、禁止合并、禁止推任何分支。' || '' }}
+
+            ## 项目背景（你启动时没有任何上下文，先读 README.md）
+
+            airgap-coder 让开发者在**没有外网的内网环境**里跑 AI 编码 CLI。架构：
+            Codex CLI（Responses 协议）→ LiteLLM 网关（协议翻译）→ 用户自建的 OpenAI 兼容模型服务（vLLM/SGLang 等）。
+            核心是 `bin/lc`，一个零依赖 Python CLI，从 `registry.json` + `.env` 生成 litellm 和 codex 配置。
+
+            几个已知的、反复出现的坑（issue 十有八九和这些相关，先对照）：
+            - Codex >= 0.145 移除了 `wire_api="chat"`，只支持 responses。vLLM 只有 chat/completions。
+              所以 LiteLLM 网关的 `use_chat_completions_api: true` 是硬依赖，缺了会报 404 / Unsupported model。
+            - 不开 `include_apply_patch_tool` 时，模型会退化成用 shell heredoc 写文件，转义容易出错。
+            - 关闭思考模式的参数名两家不同：vLLM 用 `chat_template_kwargs.enable_thinking`，
+              托管服务（百炼等）用顶层 `enable_thinking`。用错了会静默失效。
+            - vLLM 必须带 `--enable-auto-tool-choice --tool-call-parser hermes`，否则 tool_calls 恒为空。
+            - Codex 对不存在的 profile 静默回落到默认 model，会出现「以为在测 A 其实在测 B」。
+
+            ## 每次运行要做的事
+
+            1. `gh issue list --state open --json number,title,body,labels,comments,updatedAt` 拉取 open issue。
+            2. 跳过已经有你的分析评论、且此后没有新用户评论的 issue（不要重复刷屏）。
+            3. 对每个待处理 issue：读代码定位根因，在 issue 下用中文留一条评论，说清根因、影响范围、
+               修复方案。打上合适标签（bug / enhancement / question / documentation）。
+            4. **能修的直接修并合并**：
+               - 建分支 `fix/issue-<号>` 或 `feat/issue-<号>`，改动只针对该 issue，不夹带无关重构。
+               - 先跑本地静态验证（见下），通过后开 PR，描述里写清改了什么、为什么、怎么验证的，
+                 并写 `Closes #<号>`。
+               - **CI 触发说明（重要）**：本 job 用的是 GITHUB_TOKEN，GitHub 为防递归不会为你推的
+                 分支或开的 PR 自动产生 workflow run。所以你必须显式触发并等待：
+                 ```
+                 gh workflow run ci.yml --ref <你的分支名>
+                 sleep 10
+                 gh run list --workflow=ci.yml --branch <你的分支名> --limit 1 --json databaseId -q '.[0].databaseId'
+                 gh run watch <上一步拿到的 id> --exit-status
+                 ```
+                 看到 CI 全绿才合并（`gh pr merge --squash --delete-branch`）。
+               - CI 未通过、或改动是 CI 覆盖不到的，**不要合并**，留 PR 等人工审核，并在 issue 里说明卡在哪。
+            5. 拿不准的不要动：需求不清、涉及安全边界（沙箱开关、密钥处理）、
+               要改架构决策（换底座、换协议、配置分层方式）的，只评论提方案，
+               明确 @LouisDM 请求决策，不要自作主张开 PR。
+               issue 里如果作者自己就说了「想听意见再动手」，就只评论。
+
+            ## 验证手段（runner 上没有 GPU 也没有模型 API Key，只能做静态验证）
+
+            - `python3 -m py_compile bin/lc scripts/smoke.py` 语法检查
+            - `python3 bin/lc --help` 能正常跑
+            - 拿 `registry.example.json` 当假 registry.json，配一个假 .env，跑 `python3 bin/lc sync`，
+              检查生成的 litellm/config.yaml 和 codex/*.config.toml 内容正确。**跑完删掉它们**。
+            - `bash -n scripts/test-codex.sh docker/entrypoint.sh` 语法检查
+            - 本地无法跑真实模型测试（scripts/smoke.py 和 test-codex.sh 需要活的网关和 API Key），
+              不要尝试，也不要因此认为验证失败。
+            - 最终以 GitHub Actions 的 CI 结果为准。
+
+            ## 硬性约束
+
+            - **绝不提交 `.env` 或 `registry.json`**，它们含密钥和站点内网地址，已在 .gitignore。
+              提交前跑 `git status --short` 确认。
+            - 绝不 force-push，绝不改写 main 的历史。
+            - 不要在代码、注释、文档、issue 评论里写入任何真实的内网地址、域名或 API Key，
+              一律用 `your-intranet.local` 之类的占位符。
+            - 如果某个 issue 你已经开过 PR 且还没合并，不要重复开。
+            - 改动到 `bin/lc` 的配置生成器时，必须同步更新 `.github/workflows/ci.yml` 里的断言。
+            - 保持零第三方依赖：`bin/lc` 和 `scripts/smoke.py` 只用 Python 标准库，
+              不要引入 pyyaml/requests 之类。
+
+            ## 收尾
+
+            最后输出一份简报：处理了哪些 issue、开了哪些 PR、合并了哪些、
+            哪些卡住需要 LouisDM 决策及原因。没有待处理 issue 就说「本轮无新 issue」，不要硬找活干。
