@@ -3,7 +3,11 @@
 #
 # 这个包是整个项目唯一一次真正的隔离网穿越：它离开有外网的机器、跨网传递，
 # 到了内网就没有补救手段。所以最重要的断言不是「该有的都有」，而是
-# 「不该带走的一个都没带」——.env / registry.json / 生成物 / 会话库。
+# 「不该带走的一个都没带」——.env / 生成的配置 / 会话库 / .git。
+#
+# registry.json 是例外：issue #16 之后它默认跟着包走（只存结构定义与变量名），
+# 所以这里改成钉住「默认在包里 + --no-registry 时不在 + 里面还有明文凭证时
+# 拒绝打包」这三条。
 #
 # 用法: bash scripts/test-export.sh     （零依赖，只用 Python 标准库 + tar）
 set -euo pipefail
@@ -102,7 +106,7 @@ checkre() {      # checkre assert|refute <正则> <说明>；同样在 $LIST 里
   fi
 }
 checkre refute '^\.env$'                ".env 不在包里"
-checkre refute '^registry\.json$'       "registry.json 不在包里（站点特定）"
+checkre assert '^registry\.json$'       "registry.json 默认在包里（结构定义，内网侧要沿用）"
 checkre refute '^litellm/config\.yaml$' "生成的网关配置不在包里"
 checkre refute '^codex/'                "CODEX_HOME 不在包里（会话库可能含代码与 prompt）"
 checkre refute '^\.git/'                ".git 不在包里"
@@ -126,6 +130,13 @@ check assert "$PIN"                  "MANIFEST 里的 Codex 版本取自 Dockerf
 check assert "ghcr.io/berriai/litellm" "MANIFEST 里记了网关镜像名"
 check assert "digest"                 "MANIFEST 明确以内网侧 digest 为准"
 check assert "导出时间"                "MANIFEST 记了导出时间"
+# issue #16：registry.json 和 .env 的性质完全不同，并排写在「已排除」里会让
+# 内网侧的人以为它也含凭证。措辞必须说清「结构定义、不含凭证」。
+check assert "registry.json 已包含"    "MANIFEST 说明了 registry.json 在包里"
+check assert "不含任何凭证"            "MANIFEST 说清 registry 是结构定义而不是凭证"
+check refute "已排除 .env / registry.json" "MANIFEST 不再把 registry 和 .env 并列写成「已排除」"
+LIST="$DIR/install.sh"
+check assert "registry.json 已在包里"  "install.sh 的指引说明只需填地址与密钥"
 test -x "$DIR/install.sh" \
   && echo "  ✅ install.sh 是可执行的" \
   || { echo "  ❌ install.sh 没有可执行位"; fails=$((fails + 1)); }
@@ -217,6 +228,68 @@ if command -v docker >/dev/null 2>&1 &&
 else
   echo "[5] 跳过带镜像导出：没有 docker 或拉不到 hello-world（不算失败）"
 fi
+
+echo "[7] registry.json 的三条路径（issue #16）"
+# 默认带走已经在 [1][3] 里钉住了。这里钉住另外三条：显式不带、打包机上没有、
+# 以及「registry 里还有明文凭证时必须拒绝打包」——最后这条最关键：带 registry
+# 进包之后，registry 的内容就会跨网走，而早期版本把自定义头的值明文存在里面。
+
+echo "  -- 7.1 --no-registry：显式不带"
+NO_COLOR=1 python3 "$SRC/bin/lc" export --no-images --no-registry \
+  --out "$OUT/noreg1.tar.gz" > "$OUT/log7" 2>&1 \
+  || { cat "$OUT/log7"; echo "::error::--no-registry 导出失败"; exit 1; }
+tar tzf "$OUT/noreg1.tar.gz" | sed 's|^[^/]*/||' > "$OUT/list7"
+LIST="$OUT/list7"
+checkre refute '^registry\.json$' "--no-registry 时 registry.json 不在包里"
+checkre assert '^bin/lc$'         "--no-registry 只影响 registry，源码照常带走"
+mkdir -p "$OUT/z7" && tar xzf "$OUT/noreg1.tar.gz" -C "$OUT/z7"
+DIR7="$(find "$OUT/z7" -maxdepth 1 -mindepth 1 -type d | head -1)"
+LIST="$DIR7/MANIFEST.txt"
+check assert "--no-registry 导出" "MANIFEST 说清了为什么不含 registry"
+LIST="$DIR7/install.sh"
+check assert "本包不含 registry.json" "install.sh 提醒内网侧要完整配置"
+
+echo "  -- 7.2 打包机上没有 registry.json：正常打包，但要说清楚"
+mv "$SRC/registry.json" "$OUT/registry.saved.json"
+NO_COLOR=1 python3 "$SRC/bin/lc" export --no-images --out "$OUT/noreg2.tar.gz" \
+  > "$OUT/log8" 2>&1 \
+  || { cat "$OUT/log8"; echo "::error::打包机没有 registry.json 时导出应当正常完成"; exit 1; }
+mkdir -p "$OUT/z8" && tar xzf "$OUT/noreg2.tar.gz" -C "$OUT/z8"
+DIR8="$(find "$OUT/z8" -maxdepth 1 -mindepth 1 -type d | head -1)"
+LIST="$DIR8/MANIFEST.txt"
+check assert "打包机上没有这个文件" "MANIFEST 说明本包不含 registry 及其原因"
+check assert "lc init"             "MANIFEST 指出内网侧要完整配置"
+mv "$OUT/registry.saved.json" "$SRC/registry.json"
+
+echo "  -- 7.3 registry 里还有明文 header 值：必须拒绝打包"
+# 这是带 registry 进包之后新增的泄漏面：明文值会跟着包跨网走，而包宣称不含机密。
+LEAK_CANARY="lc-legacy-canary-$$-${RANDOM}${RANDOM}"
+cp "$SRC/registry.json" "$OUT/registry.clean.json"
+python3 - "$SRC/registry.json" "$LEAK_CANARY" <<'PY'
+import json, sys
+p = sys.argv[1]
+reg = json.load(open(p, encoding="utf-8"))
+name = sorted(reg["upstreams"])[0]
+reg["upstreams"][name]["headers"] = {"X-Legacy-Token": sys.argv[2]}
+json.dump(reg, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+if NO_COLOR=1 python3 "$SRC/bin/lc" export --no-images --out "$OUT/leak.tar.gz" \
+     > "$OUT/log9" 2>&1; then
+  echo "  ❌ registry 里有明文凭证时仍然打出了包"
+  echo "::error::registry 里有明文凭证时仍然打出了包"
+  fails=$((fails + 1))
+  gunzip -c "$OUT/leak.tar.gz" | grep -qa "$LEAK_CANARY" \
+    && { echo "  ❌ 而且那个明文凭证真的进了包"; fails=$((fails + 1)); }
+else
+  LIST="$OUT/log9"
+  check assert "明文 header 值" "拒绝的理由说清楚了是明文 header 值"
+  check assert "lc migrate"     "报错里给出了修法（migrate）"
+  check assert "--no-registry"  "报错里给出了另一条出路（--no-registry）"
+  test -e "$OUT/leak.tar.gz" \
+    && { echo "  ❌ 拒绝之后不该留下半个包"; fails=$((fails + 1)); } \
+    || echo "  ✅ 拒绝之后没有留下产物"
+fi
+cp "$OUT/registry.clean.json" "$SRC/registry.json"
 
 if [ "$fails" -gt 0 ]; then
   echo "=== 失败 $fails 项 ==="

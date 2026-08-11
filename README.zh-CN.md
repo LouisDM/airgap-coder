@@ -45,7 +45,7 @@ npm i -g @openai/codex@0.145.0      # 底座
 | `lc doctor` | 环境体检：代理劫持、直连上游并断言 tool calling 真的生效 |
 | `lc sync` | 由 registry.json 重新生成配置 |
 | `lc migrate` | 把 registry 里遗留的明文 HTTP 头值搬进 `.env` |
-| `lc export` | 打一个可搬运进内网的自包含离线包 |
+| `lc export [--no-images] [--no-registry]` | 打一个可搬运进内网的自包含离线包 |
 
 ## 为什么需要 LiteLLM 网关
 
@@ -69,11 +69,18 @@ Responses 协议（[讨论](https://github.com/openai/codex/discussions/7782)）
    docker pull ghcr.io/berriai/litellm:main-stable@sha256:90d8de0ea6fbb3cad145d1019d00a0149ae400b1e18e2011a60f1988f143f672
    ./bin/lc export                    # -> airgap-coder-0.145.0-<时间戳>.tar.gz
    ```
-   包里是：两个镜像的 tar、仓库源码（`git ls-files`，不含 `.env` /
-   `registry.json` / 生成物）、`install.sh`、`MANIFEST.txt`（镜像名、
+   包里是：两个镜像的 tar、仓库源码（`git ls-files`，不含 `.env` 与生成的
+   配置）、本机的 `registry.json`、`install.sh`、`MANIFEST.txt`（镜像名、
    **digest**、sha256、导出时间）、`SHA256SUMS`。镜像版本从
    `docker/Dockerfile` 的 `ARG CODEX_VERSION` 和 `docker-compose.yml` 读，
    不写死。只更新源码、镜像没变时加 `--no-images`（包会小几个 G）。
+
+   `registry.json` 默认跟着包走：它只有结构定义（模型 ID、上下文窗口、关思考
+   模式的参数形态、`KEY_*` 变量名），而内网侧最需要的恰恰是这份结构——那台机器
+   没有外网可查，参数名选错了不报错、只静默失效。凭证不在里面，地址和密钥在
+   内网侧自己写的 `.env` 里。打通用模板包发给多个站点时用 `--no-registry` 去掉；
+   如果 `registry.json` 里还有早期版本留下的明文 header 值，`lc export` 会拒绝
+   打包并提示先跑 `lc migrate`。
 
    compose 中的 LiteLLM 镜像已同时写明 tag 与 digest；`MANIFEST.txt` 还会记录
    本机实际镜像 digest，方便在隔离网两侧复核。核对完整性时以 digest 为准。
@@ -82,7 +89,7 @@ Responses 协议（[讨论](https://github.com/openai/codex/discussions/7782)）
    ```bash
    tar xzf airgap-coder-0.145.0-<时间戳>.tar.gz && cd airgap-coder-0.145.0-<时间戳>
    ./install.sh        # 校验 sha256 → docker load 两个镜像
-   ./bin/lc init       # 填内网网关地址与你的 API Key
+   ./bin/lc init       # registry 已在包里，只需填内网地址与你的 API Key
    ./bin/lc up         # 起网关
    ./bin/lc doctor     # 体检：连通性 + tool calling 真的生效
    ```
