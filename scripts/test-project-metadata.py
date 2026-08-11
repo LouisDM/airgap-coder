@@ -76,6 +76,7 @@ def main():
         if command not in readme or command not in readme_zh:
             failures += fail("bilingual READMEs do not both document %s" % command)
 
+    # This is a coarse drift guard; translated headings cannot be compared verbatim.
     english_sections = re.findall(r"^## .+$", readme, re.MULTILINE)
     chinese_sections = re.findall(r"^## .+$", readme_zh, re.MULTILINE)
     if len(english_sections) != len(chinese_sections):

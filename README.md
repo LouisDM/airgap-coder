@@ -96,8 +96,8 @@ Read [architecture](docs/architecture.md) for components and trust boundaries.
 | `lc doctor` | Diagnose versions, proxy settings, connectivity, and tool calling |
 | `lc sync` | Regenerate LiteLLM and Codex configuration |
 | `lc migrate` | Move legacy plaintext header values into `.env` |
-| `lc export [--no-images]` | Create a checksummed offline deployment bundle |
-| `lc version` | Print the airgap-coder and pinned Codex versions |
+| `lc export [--no-images] [--no-registry]` | Create a checksummed, self-contained offline bundle |
+| `lc version` | Print the airgap-coder version |
 
 Run `./bin/lc help` for the built-in reference.
 
@@ -119,7 +119,7 @@ These are starting points, not universal compatibility claims. Validate the exac
 ## Security boundaries
 
 - `.env`, generated Codex profiles, and generated LiteLLM configuration are ignored by Git.
-- Offline export includes tracked source only and excludes `.env`, `registry.json`, generated configuration, Git history, and local Codex state.
+- Offline export includes tracked source and a validated `registry.json` by default, while excluding `.env`, generated configuration, Git history, and local Codex state. Export refuses legacy plaintext header values; `--no-registry` creates a generic bundle without the registry.
 - Release source archives include SHA-256 checksums and GitHub build provenance attestations.
 - airgap-coder has no telemetry, but the model service, gateway, container runtime, and Codex runtime remain separate trust boundaries and may have their own logging behavior.
 - A checksummed bundle proves integrity, not that its contents are approved for a particular isolated environment.

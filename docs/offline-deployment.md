@@ -6,10 +6,10 @@ This guide covers the complete path from a connected staging machine to an isola
 
 airgap-coder publishes two different kinds of artifacts:
 
-- **GitHub release source archives** are reproducible snapshots of the public repository. They include SHA-256 checksums and GitHub build provenance attestations, but not container images or site configuration.
-- **`lc export` deployment bundles** are created on your staging machine. They can include the pinned Codex and LiteLLM container images, tracked source, an installer, `MANIFEST.txt`, and `SHA256SUMS`.
+- **GitHub release source archives** are reproducible snapshots of the public repository. They include SHA-256 checksums and GitHub build provenance attestations, but not container images or local site configuration.
+- **`lc export` deployment bundles** are created on your staging machine. They can include the pinned Codex and LiteLLM container images, tracked source, a validated `registry.json`, an installer, `MANIFEST.txt`, and `SHA256SUMS`.
 
-Neither artifact contains `.env`, generated Codex state, generated LiteLLM configuration, or `registry.json`.
+Neither artifact contains `.env`, generated Codex state, or generated LiteLLM configuration. A deployment bundle includes `registry.json` by default when it exists; use `--no-registry` when the receiving site should configure its model structure independently.
 
 ## 1. Prepare the connected staging machine
 
@@ -18,7 +18,7 @@ Check out a release tag rather than an arbitrary branch, then build and pull the
 ```bash
 git clone https://github.com/LouisDM/airgap-coder.git
 cd airgap-coder
-git checkout v0.1.0
+git checkout "$(git tag --sort=-version:refname | head -1)"
 
 docker build -t airgap-coder:0.145.0 -f docker/Dockerfile .
 docker pull ghcr.io/berriai/litellm:main-stable@sha256:90d8de0ea6fbb3cad145d1019d00a0149ae400b1e18e2011a60f1988f143f672
@@ -33,6 +33,12 @@ If the isolated environment already has both images and only tracked source chan
 ./bin/lc export --no-images
 ```
 
+For a generic bundle intended for multiple sites, omit the local model registry:
+
+```bash
+./bin/lc export --no-registry
+```
+
 ## 2. Inspect the bundle before transfer
 
 The export command prints the output path. Inspect its top-level contents and verify that site-specific files are absent:
@@ -45,12 +51,13 @@ tar tzf "$BUNDLE" | sed -n '1,80p'
 Expected contents include:
 
 - tracked repository source;
+- `registry.json`, when present and not disabled with `--no-registry`;
 - `install.sh`;
 - `MANIFEST.txt`;
 - image archives when `--no-images` was not used;
 - `SHA256SUMS` for image archives.
 
-The bundle must not contain `.env`, `registry.json`, generated `codex/` or `litellm/` configuration, `.git`, or local Codex state. `registry.json` is excluded because it may contain site-specific model structure even though resolved secrets are forbidden in it. Transfer an approved registry separately or run `lc init` in the isolated environment.
+The bundle must not contain `.env`, generated `codex/` or `litellm/` configuration, `.git`, or local Codex state. The included `registry.json` contains model structure and environment-variable names, not resolved endpoints or credentials. Export refuses to create a bundle if it finds legacy plaintext header values; run `./bin/lc migrate` first, or use `--no-registry` after confirming that the isolated site will configure its own registry.
 
 ## 3. Transfer and install
 
@@ -67,7 +74,7 @@ cd airgap-coder-0.145.0-YYYYMMDD-HHMMSS
 ./bin/lc test
 ```
 
-`install.sh` verifies the image archive checksums before running `docker load`. `lc doctor` then checks the local environment and the configured upstream; `lc test` verifies the gateway path.
+`install.sh` verifies the image archive checksums before running `docker load`. When the bundle includes `registry.json`, `lc init` reuses its reviewed model structure and asks only for the isolated site's endpoint and credential. Without a bundled registry, `lc init` creates the first upstream definition. `lc doctor` then checks the local environment and the configured upstream; `lc test` verifies the gateway path.
 
 ## 4. Run the Codex container
 

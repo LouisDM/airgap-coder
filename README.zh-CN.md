@@ -96,8 +96,8 @@ docker run --rm -it -v "$PWD:/workspace" \
 | `lc doctor` | 诊断版本、代理、连接与工具调用 |
 | `lc sync` | 重新生成 LiteLLM 与 Codex 配置 |
 | `lc migrate` | 将旧版明文 HTTP 头值迁移到 `.env` |
-| `lc export [--no-images]` | 生成带校验和的离线部署包 |
-| `lc version` | 显示 airgap-coder 与固定的 Codex 版本 |
+| `lc export [--no-images] [--no-registry]` | 生成带校验和的自包含离线部署包 |
+| `lc version` | 显示 airgap-coder 版本 |
 
 运行 `./bin/lc help` 可查看内置说明。
 
@@ -119,7 +119,7 @@ docker run --rm -it -v "$PWD:/workspace" \
 ## 安全边界
 
 - `.env`、生成的 Codex profile 和生成的 LiteLLM 配置都被 Git 忽略。
-- 离线导出只包含已跟踪源码，并排除 `.env`、`registry.json`、生成配置、Git 历史和本地 Codex 状态。
+- 离线导出包含已跟踪源码，并默认包含经过校验的 `registry.json`；同时排除 `.env`、生成配置、Git 历史和本地 Codex 状态。若 registry 中仍有旧版明文 HTTP 头值，导出会拒绝执行；`--no-registry` 可生成不含 registry 的通用包。
 - Release 源码包包含 SHA-256 校验和与 GitHub 构建来源证明。
 - airgap-coder 本身不采集遥测，但模型服务、网关、容器运行时和 Codex 运行时是独立信任边界，可能各自记录日志。
 - 校验和能证明文件完整性，但不代表其中内容已获准进入特定隔离环境。
