@@ -88,7 +88,7 @@ docker run --rm -it -v "$PWD:/workspace" \
   airgap-coder:0.145.0 exec "inspect this repository"
 ```
 
-The mount gives Codex access to the current workspace. Choose the mount and Codex sandbox policy according to the sensitivity of the source and the change being requested.
+The mount gives Codex access to the current workspace. In `exec` mode the image disables Codex's built-in sandbox because its Landlock/seccomp sandbox is not reliable inside many container runtimes. Treat the container as the isolation boundary: mount only the required workspace, keep sensitive host paths out, and apply your runtime's user, capability, network, and filesystem restrictions.
 
 ## Verify a GitHub release source archive
 
