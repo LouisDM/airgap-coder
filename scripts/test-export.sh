@@ -135,6 +135,10 @@ check assert "导出时间"                "MANIFEST 记了导出时间"
 check assert "registry.json 已包含"    "MANIFEST 说明了 registry.json 在包里"
 check assert "不含任何凭证"            "MANIFEST 说清 registry 是结构定义而不是凭证"
 check refute "已排除 .env / registry.json" "MANIFEST 不再把 registry 和 .env 并列写成「已排除」"
+# issue #26：措辞要和实际覆盖面一致。读的人凭 MANIFEST 判断「这份清单管到哪」，
+# 写成只覆盖镜像、或反过来暗示它能防篡改，都会让人做错决定。
+check assert "SHA256SUMS 覆盖包内每一个文件" "MANIFEST 说清校验覆盖整包，不只是镜像"
+check assert "不是篡改"                      "MANIFEST 说清 sha256 挡的是损坏而不是篡改"
 LIST="$DIR/install.sh"
 check assert "registry.json 已在包里"  "install.sh 的指引说明只需填地址与密钥"
 test -x "$DIR/install.sh" \
@@ -146,6 +150,74 @@ test -x "$DIR/bin/lc" \
 bash -n "$DIR/install.sh" \
   && echo "  ✅ 生成的 install.sh 语法正确" \
   || { echo "  ❌ 生成的 install.sh 语法错误"; fails=$((fails + 1)); }
+
+echo "[3b] SHA256SUMS 覆盖包内每一个文件（issue #26）"
+# 以前清单里只有镜像 tar 那两行：要 docker load 的镜像被校验，而内网侧要**直接
+# 执行**的 bin/lc / entrypoint.sh / scripts/*.py 一个都没有，--no-images 的包
+# 连 SHA256SUMS 都不生成。这一组钉住覆盖面，以及「清单真的管用」。
+test -f "$DIR/SHA256SUMS" \
+  && echo "  ✅ --no-images 的包里也有 SHA256SUMS" \
+  || { echo "  ❌ --no-images 的包没有 SHA256SUMS，整包一个校验值都没有"
+       echo "::error::--no-images 的包没有 SHA256SUMS"; fails=$((fails + 1)); }
+LIST="$DIR/SHA256SUMS"
+check assert "  bin/lc"               "清单覆盖 bin/lc（内网侧第一个要执行的东西）"
+check assert "  registry.json"        "清单覆盖 registry.json（内网侧 lc init 的输入）"
+check assert "  docker/entrypoint.sh" "清单覆盖 docker/entrypoint.sh"
+check assert "  MANIFEST.txt"         "清单覆盖 MANIFEST.txt"
+check assert "  install.sh"           "清单覆盖 install.sh"
+
+# 逐个比对，不只查几个代表性文件：漏掉的那个恰好是新加进包的文件时，
+# 代表性断言会全绿。这条差集断言是「以后往包里加文件忘了加校验」的门禁。
+tar tzf "$OUT/bundle.tar.gz" | sed 's|^[^/]*/||' \
+  | grep -v '/$' | grep -v '^$' | grep -v '^SHA256SUMS$' | sort > "$OUT/packed"
+sed 's/^[0-9a-f]\{64\}  //' "$DIR/SHA256SUMS" | sort > "$OUT/listed"
+UNLISTED="$(comm -23 "$OUT/packed" "$OUT/listed")"
+if [ -n "$UNLISTED" ]; then
+  echo "  ❌ 包里这些文件没有校验值：$(echo "$UNLISTED" | tr '\n' ' ')"
+  echo "::error::SHA256SUMS 没有覆盖包内全部文件"
+  fails=$((fails + 1))
+else
+  echo "  ✅ 包内除 SHA256SUMS 以外的每个文件都有校验值（共 $(wc -l < "$OUT/listed") 项）"
+fi
+
+( cd "$DIR" && sha256sum -c SHA256SUMS ) > "$OUT/sums.log" 2>&1 \
+  && echo "  ✅ 清单与包内实际内容对得上" \
+  || { echo "  ❌ 刚打出来的包自己就校验不过"; cat "$OUT/sums.log"
+       echo "::error::新包的 SHA256SUMS 校验不过"; fails=$((fails + 1)); }
+
+# 关键的一条：生成了清单不等于清单管用。改坏一个源码文件、以及删掉一个文件
+# （不完整解包的形态），都必须被抓到。少了这条，上面全部断言只证明「有清单」。
+cp -r "$DIR" "$OUT/tampered"
+echo "# tampered" >> "$OUT/tampered/bin/lc"
+rm -f "$OUT/tampered/scripts/probe.py"
+if ( cd "$OUT/tampered" && sha256sum -c SHA256SUMS ) > "$OUT/sums-bad.log" 2>&1; then
+  echo "  ❌ 改坏 bin/lc 且删掉一个文件之后校验居然还过"
+  echo "::error::SHA256SUMS 校验不出被改动的文件"
+  fails=$((fails + 1))
+else
+  LIST="$OUT/sums-bad.log"
+  check assert "bin/lc"         "被改动的文件被点名"
+  check assert "scripts/probe.py" "缺失的文件（不完整解包）也被点名"
+fi
+
+echo "[3c] 内网侧 install.sh 会因为任意一个文件被改动而拒绝安装"
+# install.sh 需要 docker 在 PATH 里（它第一步就检查），没有就跳过——这条测的是
+# 校验分支，不是 docker。带镜像那条路的 [6] 会跑完整的 install.sh。
+if command -v docker >/dev/null 2>&1; then
+  if ( cd "$OUT/tampered" && ./install.sh ) > "$OUT/install-bad.log" 2>&1; then
+    echo "  ❌ 包被改动过，install.sh 仍然照装不误"
+    echo "::error::install.sh 没有因为校验失败而中止"
+    fails=$((fails + 1))
+  else
+    LIST="$OUT/install-bad.log"
+    check assert "sha256 校验失败" "install.sh 明确说是校验失败而不是别的错"
+    check assert "bin/lc"          "install.sh 的报错点出了是哪个文件"
+    check refute "docker load"     "校验失败后没有继续 docker load"
+    check refute "镜像已就位"      "校验失败后没有给出「可以开始用了」的指引"
+  fi
+else
+  echo "  ⏭  没有 docker，跳过（install.sh 第一步就要求 docker）"
+fi
 
 echo "[4] 参数校验"
 if NO_COLOR=1 python3 "$SRC/bin/lc" export --bogus > "$OUT/log2" 2>&1; then
@@ -204,8 +276,13 @@ if command -v docker >/dev/null 2>&1 &&
   mkdir -p "$OUT/y" && tar xzf "$OUT/full.tar.gz" -C "$OUT/y"
   DIR2="$(find "$OUT/y" -maxdepth 1 -mindepth 1 -type d | head -1)"
   ( cd "$DIR2" && sha256sum -c SHA256SUMS ) >/dev/null \
-    && echo "  ✅ SHA256SUMS 与包内镜像 tar 对得上" \
+    && echo "  ✅ SHA256SUMS 与包内镜像 tar 及源码都对得上" \
     || { echo "  ❌ SHA256SUMS 校验不过"; fails=$((fails + 1)); }
+  # 带镜像的包里，两类文件必须在同一份清单里：镜像 tar 的哈希在流式落盘时算，
+  # 源码的在打包时算，走的是两条不同的代码路径（issue #26）
+  LIST="$DIR2/SHA256SUMS"
+  check assert "  images/litellm.tar.gz" "清单里有镜像 tar（流式落盘时算的那批）"
+  check assert "  bin/lc"                "清单里同时有源码（打包时算的那批）"
   LIST="$DIR2/MANIFEST.txt"
   check assert "sha256 :" "MANIFEST 记了每个镜像 tar 的 sha256"
   check refute "decoy/never-package-me" "打进包的是 litellm 服务的镜像，不是诱饵"
