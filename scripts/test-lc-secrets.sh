@@ -235,6 +235,80 @@ run /dev/null "$WORK/log7" migrate
 assert "migrate 是幂等的（第二次无事可做）" "$WORK/log7" "没有需要迁移"
 
 # ─────────────────────────────────────────────────────────────────────────
+echo "[5] lc add 同名覆盖：旧的 header 变量不许留在 .env 里当孤儿（issue #15）"
+# header 变量名由「上游名 + 头名」派生。头名一改或那个头被去掉，旧变量就没有
+# 任何配置引用它了；不清掉的话，一个不再被引用的凭证值会一直留在 .env 里，
+# 并被 docker-compose 的 env_file 注入网关容器。rm 一直是清的，漏的是 add。
+add_gamma() {  # add_gamma <API Key> <要不要自定义头 y/n> [头名] [头值]
+  local key="$1" want="$2" hk="${3:-}" hv="${4:-}"
+  {
+    echo "gamma"
+    # registry 里已经有 gamma 时，_add_one 会先问一句「覆盖?」；没有时这一行
+    # 会被当成 Base URL 之前的多余输入，所以只在覆盖场景喂。
+    [ -n "${GAMMA_EXISTS:-}" ] && echo "y"
+    echo "http://gamma-$HOSTNAME_CANARY:8000/v1"
+    echo "Qwen/Qwen3-4B"
+    echo "$key"
+    echo ""        # 上下文窗口取默认
+    echo ""        # 最大输出取默认
+    echo "1"       # 后端类型: vLLM
+    echo "$want"
+    if [ "$want" = y ]; then echo "$hk"; echo "$hv"; echo ""; fi
+  } > "$WORK/ag"
+  run "$WORK/ag" "$WORK/log-gamma" add
+  GAMMA_EXISTS=1
+}
+
+CANARY_HDR_OLD="lc-hdr-old-canary-$$-${RANDOM}${RANDOM}"
+CANARY_HDR_NEW="lc-hdr-new-canary-$$-${RANDOM}${RANDOM}"
+CANARY_HDR_NEW2="lc-hdr-new2-canary-$$-${RANDOM}${RANDOM}"
+CANARY_HDR_OTHER="lc-hdr-other-canary-$$-${RANDOM}${RANDOM}"
+CANARY_KEY3="lc-key3-canary-$$-${RANDOM}${RANDOM}"
+
+# 邻居上游：它的 header 变量前缀不同，任何清理都不该碰到它
+cat > "$WORK/a5" <<EOF
+delta
+http://delta-$HOSTNAME_CANARY:8000/v1
+Qwen/Qwen3-8B
+$CANARY_KEY3
+EOF
+cat >> "$WORK/a5" <<EOF
+
+
+1
+y
+User-Agent
+$CANARY_HDR_OTHER
+
+EOF
+run "$WORK/a5" "$WORK/log8" add
+
+add_gamma "$CANARY_KEY3" y "X-Old-Token" "$CANARY_HDR_OLD"
+assert "覆盖前 .env 里有旧 header 变量" "$ENVF" "KEY_GAMMA_HEADER_X_OLD_TOKEN=$CANARY_HDR_OLD"
+
+# (a) 换头名覆盖：旧变量必须消失，新变量必须写进去
+add_gamma "$CANARY_KEY3" y "X-New-Token" "$CANARY_HDR_NEW"
+cat "$WORK/log-gamma"
+refute "换头名覆盖后旧 header 变量已清除"     "$ENVF" "KEY_GAMMA_HEADER_X_OLD_TOKEN"
+refute "换头名覆盖后旧 header 的值不再留在 .env" "$ENVF" "$CANARY_HDR_OLD"
+assert "新 header 变量正常写入"               "$ENVF" "KEY_GAMMA_HEADER_X_NEW_TOKEN=$CANARY_HDR_NEW"
+assert "清理动作有一行说明（不静默）"          "$WORK/log-gamma" "KEY_GAMMA_HEADER_X_OLD_TOKEN"
+refute "registry.json 里也不再引用旧头名"     "$REG" "X-Old-Token"
+assert "邻居上游的 header 变量没被误删"        "$ENVF" "KEY_DELTA_HEADER_USER_AGENT=$CANARY_HDR_OTHER"
+
+# (b) 头名不变、只换值：新值必须留下。清理顺序写反就会把用户刚输入的值删掉，
+#     这条断言专门钉住那个顺序。
+add_gamma "$CANARY_KEY3" y "X-New-Token" "$CANARY_HDR_NEW2"
+assert "头名不变时新输入的值没被误删"          "$ENVF" "KEY_GAMMA_HEADER_X_NEW_TOKEN=$CANARY_HDR_NEW2"
+refute "头名不变时旧值已被新值取代"            "$ENVF" "$CANARY_HDR_NEW"
+
+# (c) 覆盖时干脆不要自定义头：registry 里引用没了，.env 里也不许留
+add_gamma "$CANARY_KEY3" n
+refute "去掉自定义头后 .env 里没有孤儿变量"    "$ENVF" "KEY_GAMMA_HEADER_"
+refute "去掉自定义头后 header 的值不再留在 .env" "$ENVF" "$CANARY_HDR_NEW2"
+assert "邻居上游依然完好"                     "$ENVF" "KEY_DELTA_HEADER_USER_AGENT=$CANARY_HDR_OTHER"
+
+# ─────────────────────────────────────────────────────────────────────────
 if [ "$fails" -gt 0 ]; then
   echo "=== 失败 $fails 项 ==="
   exit 1
