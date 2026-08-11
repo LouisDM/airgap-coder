@@ -67,7 +67,7 @@ docker run --rm -it -v "$PWD:/workspace" \
   -e GATEWAY_URL=http://gateway.your-intranet.local:4000/v1 \
   -e GATEWAY_KEY=your-gateway-key \
   -e MODEL=your-model \
-  airgap-coder:0.145.0 exec "inspect this repository"
+  airgap-coder:0.1.0 exec "inspect this repository"
 ```
 
 See the complete [offline deployment guide](docs/offline-deployment.md) before crossing a network boundary.

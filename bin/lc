@@ -681,6 +681,13 @@ def cmd_code(argv):
     sys.exit(subprocess.call(["codex", "--profile", profile] + list(argv), env=env))
 
 
+def _dev_image_ref():
+    """开发镜像的 tag。单独成函数：Dockerfile 头部注释、文档和 `lc export` 三处
+    必须说同一个 tag，有一处漂了就是「按文档构建出来的镜像 export 不认」。
+    scripts/test-version.sh 直接调它来钉住这一致性。"""
+    return "airgap-coder:%s" % project_version()
+
+
 def _dockerfile_codex_version():
     """ARG CODEX_VERSION pinned in docker/Dockerfile (airgap lock)."""
     df = ROOT / "docker" / "Dockerfile"
@@ -1100,19 +1107,28 @@ def cmd_export(argv):
 
     codex_ver = _dockerfile_codex_version()
     if not codex_ver:
-        die("读不到 docker/Dockerfile 里的 ARG CODEX_VERSION，无法确定镜像版本")
+        die("读不到 docker/Dockerfile 里的 ARG CODEX_VERSION，无法确定 Codex 基线")
     litellm_ref = _compose_litellm_image()
     if not litellm_ref:
         die("读不到 docker-compose.yml 里的 litellm 镜像名")
-    dev_ref = "airgap-coder:%s" % codex_ver
+    # 镜像 tag 和包名用**本项目**的版本，不用 Codex 的（issue #36）。airgap-coder
+    # 自己迭代而不换 Codex 版本是最常见的情况，用 Codex 版本会让不同的发布产生
+    # 同名镜像：内网侧 docker load 进去新的直接覆盖旧的，无法并存也无法回退，
+    # 而 tag 恰恰是内网出问题时第一眼能看到的信息。
+    app_ver = project_version()
+    if app_ver == "unknown":
+        die("读不到 VERSION 文件，无法确定镜像 tag 与包名")
+    dev_ref = _dev_image_ref()
 
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    bundle_name = "airgap-coder-%s-%s" % (codex_ver, stamp)
+    bundle_name = "airgap-coder-%s-%s" % (app_ver, stamp)
     out = pathlib.Path(out_path).expanduser() if out_path else \
         ROOT / ("%s.tar.gz" % bundle_name)
     out = out.resolve()
 
     head("导出离线包")
+    say("  本体版本 : %s" % app_ver)
+    say("  Codex    : %s" % codex_ver)
     say("  开发镜像 : %s" % dev_ref)
     say("  网关镜像 : %s" % litellm_ref)
     say("  产物     : %s" % out)
@@ -1173,7 +1189,12 @@ def cmd_export(argv):
             "",
             "导出时间   : %s" % datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S %z").strip(),
             "包名       : %s" % bundle_name,
-            "Codex 版本 : %s  (docker/Dockerfile 的 ARG CODEX_VERSION)" % codex_ver,
+            # 两个版本号并列且各自标清来源：内网侧读的人要能一眼分出「这是
+            # airgap-coder 的哪次发布」和「它锁的 Codex 是哪个版本」。混成一个
+            # 数字就是 issue #36 的成因。
+            "本体版本   : %s  (VERSION，也是镜像 tag 与包名的来源)" % app_ver,
+            "Codex 基线 : %s  (docker/Dockerfile 的 ARG CODEX_VERSION)" % codex_ver,
+            "开发镜像   : %s" % dev_ref,
             "源码文件数 : %d  (git ls-files，已排除 .env 与生成的配置)" % len(files),
             "",
             "上游注册表:",

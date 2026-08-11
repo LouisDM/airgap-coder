@@ -127,6 +127,23 @@ LIST="$DIR/MANIFEST.txt"
 cat "$LIST"
 PIN="$(sed -n 's/^ARG CODEX_VERSION=//p' "$SRC/docker/Dockerfile" | head -1)"
 check assert "$PIN"                  "MANIFEST 里的 Codex 版本取自 Dockerfile（不写死）"
+# issue #36：镜像 tag 和包名必须用本项目的版本（VERSION），不是 Codex 的。用 Codex
+# 版本的话，本项目每次发布都产出同名镜像，内网侧 docker load 新的覆盖旧的，既不能
+# 并存也不能回退，而 tag 是内网出问题时第一眼看到的信息。
+APPVER="$(tr -d '[:space:]' < "$SRC/VERSION")"
+test -n "$APPVER" || { echo "::error::读不到 VERSION"; exit 1; }
+test "$APPVER" != "$PIN" || { echo "::error::两个版本号相等，这组断言测不出东西"; exit 1; }
+check assert "包名       : airgap-coder-$APPVER-" "包名用本项目版本，不是 Codex 版本"
+check refute "包名       : airgap-coder-$PIN-"    "包名里没有 Codex 版本"
+check assert "本体版本   : $APPVER"               "MANIFEST 分开记了本项目版本"
+check assert "Codex 基线 : $PIN"                  "MANIFEST 分开记了 Codex 基线"
+check assert "开发镜像   : airgap-coder:$APPVER"  "MANIFEST 里的开发镜像 tag 用本项目版本"
+# 包名同时也是解包后的目录名，内网侧靠它区分两次发布
+case "$(basename "$DIR")" in
+  airgap-coder-"$APPVER"-*) echo "  ✅ 解包目录名用本项目版本" ;;
+  *) echo "  ❌ 解包目录名是 $(basename "$DIR")，没有用本项目版本 $APPVER"
+     echo "::error::解包目录名没有用本项目版本"; fails=$((fails + 1)) ;;
+esac
 check assert "ghcr.io/berriai/litellm" "MANIFEST 里记了网关镜像名"
 check assert "digest"                 "MANIFEST 明确以内网侧 digest 为准"
 check assert "导出时间"                "MANIFEST 记了导出时间"
@@ -242,7 +259,9 @@ if command -v docker >/dev/null 2>&1 &&
    printf 'FROM hello-world\nLABEL lc.test=1\n' |
      docker build -q -t airgap-coder:test-tiny - >/dev/null 2>&1; then
   echo "[5] 带镜像导出（用 hello-world 当镜像替身）"
-  sed -i.bak 's/^ARG CODEX_VERSION=.*/ARG CODEX_VERSION=test-tiny/' "$SRC/docker/Dockerfile"
+  # 开发镜像的 tag 由 VERSION 推导（issue #36），所以替身要改副本里的 VERSION，
+  # 不是 Dockerfile 的 ARG CODEX_VERSION——那个现在只影响 MANIFEST 里的基线一行。
+  echo "test-tiny" > "$SRC/VERSION"
   # 替身按「仓库前缀」整行替换，不匹配 tag 或 digest 的形态（issue #13）。
   # 写死成 `litellm:` 的话，compose 换成纯 digest 形式（repo@sha256:…）后这条
   # sed 就不再匹配，替身没换上，export 会去找那个真实 digest 的镜像、本机没有、
