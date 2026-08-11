@@ -2,7 +2,7 @@
 #
 # 构建（在有外网的机器上做一次，产物导出带进内网）：
 #   docker build -t airgap-coder:0.145.0 -f docker/Dockerfile .
-#   docker pull ghcr.io/berriai/litellm:main-stable
+#   docker pull ghcr.io/berriai/litellm:main-stable@sha256:90d8de0ea6fbb3cad145d1019d00a0149ae400b1e18e2011a60f1988f143f672
 #   ./bin/lc export      # 两个镜像 + 源码 + install.sh + MANIFEST 打成一个包
 #
 # 内网使用（解包后跑 ./install.sh 会自动 docker load）：
@@ -12,7 +12,7 @@
 #     -e MODEL=your-model-name \
 #     airgap-coder:0.145.0 exec "重构 foo.py"
 
-FROM node:22-slim
+FROM node:22-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436
 
 # 版本锁死。Codex 有过单方面移除 wire_api="chat" 的先例，
 # 隔离网环境不应该留自动更新的口子。

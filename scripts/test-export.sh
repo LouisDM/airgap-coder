@@ -124,7 +124,7 @@ cat "$LIST"
 PIN="$(sed -n 's/^ARG CODEX_VERSION=//p' "$SRC/docker/Dockerfile" | head -1)"
 check assert "$PIN"                  "MANIFEST 里的 Codex 版本取自 Dockerfile（不写死）"
 check assert "ghcr.io/berriai/litellm" "MANIFEST 里记了网关镜像名"
-check assert "digest"                 "MANIFEST 提到 digest（main-stable 是移动 tag，核对要看 digest）"
+check assert "digest"                 "MANIFEST 明确以内网侧 digest 为准"
 check assert "导出时间"                "MANIFEST 记了导出时间"
 test -x "$DIR/install.sh" \
   && echo "  ✅ install.sh 是可执行的" \
@@ -160,7 +160,7 @@ if command -v docker >/dev/null 2>&1 &&
      docker build -q -t airgap-coder:test-tiny - >/dev/null 2>&1; then
   echo "[5] 带镜像导出（用 hello-world 当镜像替身）"
   sed -i.bak 's/^ARG CODEX_VERSION=.*/ARG CODEX_VERSION=test-tiny/' "$SRC/docker/Dockerfile"
-  sed -i.bak 's#image: ghcr.io/berriai/litellm:main-stable#image: hello-world:latest#' \
+  sed -i.bak 's#^[[:space:]]*image: ghcr.io/berriai/litellm:.*#    image: hello-world:latest#' \
     "$SRC/docker-compose.yml"
   NO_COLOR=1 python3 "$SRC/bin/lc" export --out "$OUT/full.tar.gz" \
     > "$OUT/log3" 2>&1 || { cat "$OUT/log3"; echo "::error::带镜像导出失败"; exit 1; }

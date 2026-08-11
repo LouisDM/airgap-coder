@@ -38,7 +38,7 @@ jobs:
       actions: write         # 触发 CI（见下方 prompt 里的说明）
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           # 用 PAT 而非 GITHUB_TOKEN 推分支：GITHUB_TOKEN 推的分支/开的 PR
@@ -63,7 +63,7 @@ jobs:
           git config user.name  "issue-agent[bot]"
           git config user.email "issue-agent@users.noreply.github.com"
 
-      - uses: anthropics/claude-code-action@v1
+      - uses: anthropics/claude-code-action@5ef2e550a465a721f4f45e4a7d3c340c873e1dcc # v1
         env:
           # 发评论专用：GITHUB_TOKEN 身份是 github-actions[bot]，评论会明确
           # 标为机器人。PAT 属主是维护者本人，用它发评论会让 agent 的发言和
@@ -216,15 +216,14 @@ jobs:
             ## 硬性约束
 
             - **绝不提交 `.env`**，它含全部密钥。提交前跑 `git status --short` 确认。
-            - `registry.json` 目前也在 .gitignore，但注意 issue #4 正在把它改成可提交
-              （它只存变量名，不存地址和密钥）。实现 #4 时按该 issue 里的决策走，
-              其它时候不要动它的 gitignore 状态。
+            - `registry.json` 可以提交，但只允许结构定义和 `KEY_*` 变量名；地址、密钥、
+              自定义 HTTP 头值必须只存在 `.env`。不要把站点私有 registry 打进离线包。
             - 绝不 force-push，绝不改写 main 的历史。
             - 不要在代码、注释、文档、issue 评论里写入任何真实的内网地址、域名或 API Key，
               一律用 `your-intranet.local` 之类的占位符。
             - 如果某个 issue 你已经开过 PR 且还没合并，不要重复开。
             - 改动到 `bin/lc` 的配置生成器时，必须同步更新 `.github/workflows/ci.yml` 里的断言。
-            - 保持零第三方依赖：`bin/lc` 和 `scripts/smoke.py` 只用 Python 标准库，
+            - 保持零第三方依赖：`bin/lc` 和 `scripts/*.py` 只用 Python 标准库，
               不要引入 pyyaml/requests 之类。
 
             ## 收尾

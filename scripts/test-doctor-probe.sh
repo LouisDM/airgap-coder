@@ -14,6 +14,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PORT="${PROBE_PORT:-8931}"
+PYTHON_BIN="$(command -v python3)"
 
 # 整份测试在临时目录里跑：bin/lc 的 ROOT 由自身路径推导，registry.json 和 .env
 # 会落在 ROOT 下。复制一份出去，才不会覆盖开发机上真实的 registry.json / .env。
@@ -181,8 +182,10 @@ fake_codex() {   # $1 = `codex --version` 打印的内容；不传则删掉假 c
 }
 
 run_doctor_version() {
-  PATH="$WORK/fakebin:$PATH" NO_COLOR=1 \
-    python3 "$WORK/bin/lc" doctor > "$WORK/out" 2>&1 || true
+  # 版本测试必须只看 fakebin 里的 codex。若继续拼接调用者的 PATH，删除假
+  # codex 后会意外命中开发机上真实安装的 codex，使「未安装」分支无法测试。
+  PATH="$WORK/fakebin:/usr/bin:/bin" NO_COLOR=1 \
+    "$PYTHON_BIN" "$WORK/bin/lc" doctor > "$WORK/out" 2>&1 || true
 }
 
 pin_version 0.145.0

@@ -27,9 +27,16 @@ env_key = "LITELLM_MASTER_KEY"
 wire_api = "responses"
 EOF
 
-# 容器本身就是隔离边界；Codex 的 Landlock/seccomp 沙箱在多数容器运行时下
-# 会初始化失败，显式关掉避免启动即报错。
-exec codex \
-  --skip-git-repo-check \
-  --dangerously-bypass-approvals-and-sandbox \
-  "$@"
+# `--skip-git-repo-check` 是 `codex exec` 的子命令参数，不能放在 Codex 顶层。
+# 容器本身是这里选定的隔离边界；Codex 的 Landlock/seccomp 沙箱在多数容器
+# 运行时下会初始化失败，所以仅对非交互 exec 显式关闭。
+if [ "${1:-}" = "exec" ]; then
+  shift
+  exec codex exec \
+    --skip-git-repo-check \
+    --dangerously-bypass-approvals-and-sandbox \
+    "$@"
+fi
+
+# --help / --version 等普通 Codex 命令不接受 exec 专属参数。
+exec codex "$@"

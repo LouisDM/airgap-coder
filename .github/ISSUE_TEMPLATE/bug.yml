@@ -1,0 +1,52 @@
+name: Bug report
+description: Report a reproducible airgap-coder defect
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove credentials, private endpoints, prompts, and proprietary source from all output. Use the Security tab for vulnerabilities.
+  - type: input
+    id: version
+    attributes:
+      label: airgap-coder version
+      description: Release tag or commit SHA.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python, Docker/Compose, Codex, LiteLLM digest, inference server, and model versions.
+      placeholder: macOS 15; Python 3.9; Codex 0.145.0; ...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest safe, repeatable example.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and redacted logs
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed all credentials, private endpoints, proprietary prompts, and private source.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

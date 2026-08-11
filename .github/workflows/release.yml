@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.9"
+
+      - name: Verify tag and repository
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF_NAME#v}" = "$(tr -d '[:space:]' < VERSION)" \
+            || { echo "::error::tag $GITHUB_REF_NAME does not match VERSION"; exit 1; }
+          python3 -m py_compile bin/lc scripts/*.py
+          bash -n scripts/*.sh docker/entrypoint.sh
+          bash scripts/test-version.sh
+          python3 scripts/test-project-metadata.py
+          bash scripts/test-entrypoint.sh
+          bash scripts/test-codex-review-script.sh
+          bash scripts/test-doctor-probe.sh
+          bash scripts/test-export.sh
+          bash scripts/test-lc-secrets.sh
+
+      - name: Build reproducible source archives
+        run: |
+          set -euo pipefail
+          name="airgap-coder-${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          git archive --format=tar --prefix="$name/" "$GITHUB_SHA" | gzip -n > "dist/$name.tar.gz"
+          git archive --format=zip --prefix="$name/" -o "dist/$name.zip" "$GITHUB_SHA"
+          cd dist
+          sha256sum "$name.tar.gz" "$name.zip" > SHA256SUMS
+
+      - name: Attest source archives
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: source-${{ github.ref_name }}
+          path: dist/
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name="airgap-coder-${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/$name.tar.gz" \
+            "dist/$name.zip" \
+            dist/SHA256SUMS \
+            --verify-tag --generate-notes --title "$GITHUB_REF_NAME"

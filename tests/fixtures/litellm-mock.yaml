@@ -1,0 +1,18 @@
+model_list:
+  - model_name: mock-model
+    litellm_params:
+      model: openai/mock-model
+      api_base: http://mock-backend:8080/v1
+      api_key: sk-airgap-test-upstream
+      use_chat_completions_api: true
+    model_info:
+      context_window: 8192
+      max_output_tokens: 1024
+
+litellm_settings:
+  drop_params: true
+  request_timeout: 30
+  num_retries: 0
+
+general_settings:
+  master_key: sk-airgap-test-master

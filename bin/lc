@@ -37,6 +37,14 @@ LITELLM_CFG = ROOT / "litellm" / "config.yaml"
 CODEX_DIR = ROOT / "codex"
 GW_PORT_DEFAULT = 4000
 
+
+def project_version():
+    """Read the release version from the single source of truth."""
+    try:
+        return (ROOT / "VERSION").read_text().strip()
+    except OSError:
+        return "unknown"
+
 C = {"r": "\033[31m", "g": "\033[32m", "y": "\033[33m", "b": "\033[36m",
      "d": "\033[2m", "x": "\033[0m", "B": "\033[1m"}
 if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
@@ -772,14 +780,14 @@ def cmd_sync(argv):
 # 到内网就没有补救手段了。所以这里的取舍一律偏保守：
 #   - 源码清单用 `git ls-files`，天然尊重 .gitignore，不手写排除列表；
 #   - 打完包再显式断言敏感路径不在包里（纵深防御，不只依赖 gitignore 正确）；
-#   - MANIFEST 记镜像 digest 而不只是 tag，因为 litellm 用的是 main-stable
-#     这种移动 tag，两次 pull 可能拿到不同镜像却写着同一个版本号；
+#   - MANIFEST 记镜像 digest 而不只是 tag；即使 compose 已钉 digest，导出时仍
+#     记录本机实际镜像身份，便于在隔离网两侧复核；
 #   - 镜像 tar 是 GB 级，流式落盘，不进内存。
 
 # 不管 git 怎么说，这些路径永远不进包。registry.json 也在里面：它虽然只存变量名
 # （issue #4 之后可能变成受版本控制的文件），但仍是站点特定的，不该跟着包乱跑。
 BUNDLE_NEVER = (".env", ".env.local", "registry.json", "litellm/config.yaml")
-BUNDLE_NEVER_DIRS = ("codex/", ".smoke/", ".git/")
+BUNDLE_NEVER_DIRS = ("codex/", ".smoke/", ".codex-review/", ".git/")
 
 
 def _compose_litellm_image():
@@ -1020,8 +1028,8 @@ def cmd_export(argv):
             lines.append("  （本包不含镜像，--no-images 导出）")
         lines += [
             "",
-            "digest 是镜像的唯一标识；tag 不是。%s 这类移动 tag 两次拉取可能是" % litellm_ref,
-            "不同镜像，内网侧核对时以 digest 为准。",
+            "digest 是镜像的唯一标识；tag 不是。当前引用为 %s。" % litellm_ref,
+            "即使 tag 与 digest 同时存在，内网侧仍应以 digest 为准。",
             "",
             "内网侧: 解包后跑 ./install.sh，然后 ./bin/lc init",
         ]
@@ -1124,6 +1132,9 @@ def usage():
 
 def main():
     argv = sys.argv[1:]
+    if argv and argv[0] in ("-V", "--version", "version"):
+        say("airgap-coder %s" % project_version())
+        return
     if not argv or argv[0] in ("-h", "--help", "help"):
         usage()
         return
