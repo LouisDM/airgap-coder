@@ -12,8 +12,8 @@ import urllib.error
 import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-GW = "http://127.0.0.1:4000"
 ENV_FILE = ROOT / ".env"
+REGISTRY = ROOT / "registry.json"
 
 sys.path.insert(0, str(ROOT / "scripts"))
 import probe  # noqa: E402  —— 探测请求体、断言与失败提示，与 `lc doctor` 共用一份
@@ -41,6 +41,32 @@ if not MASTER_KEY:
     abort(".env 里没有 LITELLM_MASTER_KEY，无法向网关鉴权",
           "跑 `lc init` 补齐（它会随机生成一个 master key 写进 .env），再 `lc up` 重启网关")
 
+
+def gateway_url():
+    """网关地址。端口的真源是 registry.json 的 gateway_port，和 bin/lc 同一份。
+
+    原来这里写死 4000：改过端口的机器上 `lc test` 打的是空气、而 `lc status` 打的
+    是真网关，同一台机器上两个诊断命令互相矛盾（issue #40）。读不到 registry 时
+    不回落到 4000——那正是「静默失效」本身，端口不知道就直说。
+    """
+    try:
+        reg = json.loads(REGISTRY.read_text())
+    except OSError:
+        abort("找不到 %s，不知道网关端口" % REGISTRY,
+              "先跑 `lc init` 完成初始化，或直接用 `lc test` 跑本脚本")
+    except ValueError as e:
+        abort("registry.json 不是合法 JSON（%s），读不出网关端口" % e,
+              "修好 registry.json，或跑 `lc init` 重新生成")
+    port = reg.get("gateway_port", 4000)
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        abort("registry.json 里的 gateway_port=%r 不是端口号" % (port,),
+              "改成整数，或跑 `lc init` 重设")
+    return "http://127.0.0.1:%d" % port
+
+
+GW = gateway_url()
 MODEL = sys.argv[1] if len(sys.argv) > 1 else "qwen32b"
 AUTH = {"Authorization": "Bearer " + MASTER_KEY,
         "Content-Type": "application/json"}
@@ -72,7 +98,9 @@ def no(msg, detail="", hint=""):
 
 print("=== 冒烟测试: model=%s ===" % MODEL)
 
-print("[1/5] 网关存活")
+# 地址打出来：探不通时第一件要确认的事就是「它探的是哪个端口」，而这个端口
+# 由 registry 决定、不一定是 4000。
+print("[1/5] 网关存活 %s" % GW)
 try:
     urllib.request.urlopen(GW + "/health/liveliness", timeout=10).read()
     ok("gateway up")

@@ -49,7 +49,8 @@ def chat_payload(model, params=None):
 # 省得每个用户重新踩一遍。key 对应下面的断言分支与 smoke.py 的 5 步。
 HINTS = {
     "gateway_down":
-        "先 `lc up` 起网关，再 `lc status` 确认 4000 端口存活；"
+        "先 `lc up` 起网关，再 `lc status` 确认网关端口存活"
+        "（端口是 registry.json 里的 gateway_port，不一定是 4000）；"
         "起不来就看 `lc logs`",
     "chat_failed":
         "上游地址或密钥不对，也可能是本机代理劫持了内网地址（Clash tun 模式会劫 DNS）。"

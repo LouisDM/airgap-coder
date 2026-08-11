@@ -20,6 +20,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- The gateway port asked for by `lc init` now takes effect everywhere. `registry.json`'s `gateway_port` is the single source: `lc` injects it into the Compose environment, and `lc test` reads it instead of assuming `4000`. Previously a non-default port produced a machine where `lc status` reported the gateway dead while `lc test` reached it, because the container was published on the `.env` value. `GATEWAY_PORT` is gone from `.env.example`.
 - Offline bundle names and the development image tag now use airgap-coder's own `VERSION` instead of the pinned Codex version, so successive releases no longer collide on a single `airgap-coder:0.145.0` tag in an isolated environment. The Codex baseline moved to an image label and a dedicated manifest line.
 - `lc up` now stops immediately when `docker compose up` fails, reports the exit code instead of pointing at an empty `lc logs`, and exits non-zero when the gateway never becomes reachable.
 - `LC_GATEWAY_WAIT` is now a wall-clock budget rather than a probe count, so an unreachable gateway behind a packet-dropping firewall no longer takes six times the advertised limit.

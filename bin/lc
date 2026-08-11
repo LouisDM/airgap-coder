@@ -245,7 +245,7 @@ def _yaml_block(obj, indent):
 
 def gen_codex(reg):
     CODEX_DIR.mkdir(exist_ok=True)
-    port = reg.get("gateway_port", GW_PORT_DEFAULT)
+    port = gw_port(reg)
     default = reg.get("default") or (sorted(reg["upstreams"]) or [None])[0]
     base = []
     base.append("# 本文件由 `lc sync` 自动生成，请勿手改。")
@@ -321,12 +321,49 @@ def warn_legacy_headers(reg):
 # ---------------------------------------------------------------- docker
 
 def compose(*args, **kw):
-    return subprocess.call(["docker", "compose"] + list(args), cwd=str(ROOT), **kw)
+    """docker compose 的薄封装，网关端口从 registry 注入子进程环境。
+
+    docker-compose.yml 里的 `${GATEWAY_PORT:-4000}` 只能从环境或 .env 读，而端口
+    的真源是 registry.json 的 gateway_port——`lc init` 问的就是它，gw_url() 和
+    gen_codex() 也都读它。而在此之前**没有任何代码写过 GATEWAY_PORT**，于是把端口
+    答成非 4000 的人会得到：容器发布在 4000，status / code / doctor 去连 registry
+    里那个端口，两个诊断命令互相矛盾（issue #40）。
+
+    注入到环境而不是让 `lc sync` 往 .env 里写一份：写 .env 只是让两个源保持同步，
+    源还是两个，将来有人手改 .env 里的 GATEWAY_PORT 又会漂移，而那次漂移谁都看不
+    出来（registry 和 .env 都是「正常」文件）。把 .env 从这条链路上摘掉之后，漂移
+    在结构上就不可能发生。compose 的插值里环境变量优先于 .env 文件，所以老用户
+    .env 里残留的那行也不会再生效。
+
+    docker-compose.yml 里的 `:-4000` 默认值保留：不经过 lc 直接 `docker compose up`
+    的人仍然能工作。
+    """
+    env = dict(os.environ)
+    env["GATEWAY_PORT"] = str(gw_port())
+    return subprocess.call(["docker", "compose"] + list(args), cwd=str(ROOT),
+                           env=env, **kw)
+
+
+def gw_port(reg=None):
+    """网关端口。唯一真源是 registry.json 的 gateway_port。
+
+    这个函数就是那个「唯一」的落实处：gw_url()、gen_codex() 生成的 base_url、
+    compose 的端口映射、scripts/smoke.py 全部经它（或同一份 registry 字段）取值。
+    手改坏了的值不静默回落——这个项目里静默回落已经坑过人（Codex 对不存在的
+    profile 就是静默回落到默认 model），端口回落到 4000 会重演 issue #40 那个
+    「status 说死了、test 说活着」的形态。
+    """
+    reg = load_registry() if reg is None else reg
+    raw = reg.get("gateway_port", GW_PORT_DEFAULT)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        die("registry.json 里的 gateway_port=%r 不是端口号。"
+            "改成整数，或跑 `lc init` 重设。" % (raw,))
 
 
 def gw_url(reg=None):
-    reg = reg or load_registry()
-    return "http://127.0.0.1:%d" % reg.get("gateway_port", GW_PORT_DEFAULT)
+    return "http://127.0.0.1:%d" % gw_port(reg)
 
 
 def gw_alive(reg=None, timeout=None):
