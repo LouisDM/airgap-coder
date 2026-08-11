@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 钉住 lc use / ls / up / down / status 的行为（issue #12 第二梯队），以及
-# `lc up` 的等待预算按墙上时钟计这个不变量（issue #35）。
+# `lc up` 的两条失败路径（issue #34 compose 退出码 / issue #35 等待预算）。
 #
 # 这五个命令写坏了不会泄密，但会浪费大量排查时间，而且其中两条正好踩在项目
 # 已知的坑上：
@@ -310,6 +310,11 @@ cat "$WORK/log-up-fail"
 [ "$ELAPSED" -lt 15 ] \
   && pass "注入的超时真的生效了（失败分支 ${ELAPSED}s 内返回，不是 45s）" \
   || fail "LC_GATEWAY_WAIT 只改了提示语，wait_gw 仍然等了 ${ELAPSED}s"
+# 退出码（issue #34）：原来 up 无论成败都退 0，`lc up && lc test` 会照样往下跑，
+# 站点部署脚本没法判断网关到底起没起。
+[ "$RC" -ne 0 ] \
+  && pass "网关没起来时 lc up 以非零退出码收场（RC=$RC）" \
+  || fail "网关没起来，lc up 却退了 0——部署脚本无法判断成败"
 # 带上 ❌ 一起断言：只查措辞的话，把 err 改成 ok 不会有任何东西变红——
 # 那会让一次失败的启动读起来像成功。
 assert "网关起不来时说清了超时，且是以失败的形式" \
@@ -361,6 +366,47 @@ run "$WORK/log-help" help
 assert "help 列出了 LC_GATEWAY_WAIT" "$WORK/log-help" "LC_GATEWAY_WAIT"
 
 # ─────────────────────────────────────────────────────────────────────────
+echo "[3f] compose 自己就失败了：立刻停下，别再等满预算（issue #34）"
+# 端口被占、镜像没 docker load、compose 文件语法错——这几条在内网首次部署很常见，
+# 共同点是 docker 自己已经把原因打在屏幕上了。原来 cmd_up 丢掉这个退出码，于是
+# 一个已经诊断清楚的错误变成了预算耗尽之后的一句「看日志: lc logs」，而容器根本
+# 没起来、那份日志是空的，真正的原因早就滚出屏幕了。
+export DOCKER_RC=1
+: > "$DOCKER_LOG"
+elapsed_of 5 "$WORK/log-up-rc" up
+cat "$WORK/log-up-rc"
+assert "仍然试过 compose up"  "$DOCKER_LOG" "compose up -d --force-recreate"
+[ "$RC" -ne 0 ] \
+  && pass "compose 失败时 lc up 以非零退出码收场（RC=$RC）" \
+  || fail "compose 已经失败，lc up 却退了 0"
+# 这条是这一节的重点：不能进等待循环。只查措辞的话，「先等满预算再报同一句话」
+# 也能过——而那正是原来的行为。
+[ "$ELAPSED" -lt 4 ] \
+  && pass "compose 失败时不进等待循环（${ELAPSED}s 内返回）" \
+  || fail "compose 已经失败，lc up 还等了 ${ELAPSED}s"
+assert "报错里带上了 docker 的退出码"  "$WORK/log-up-rc" "退出码 1"
+assert "给了常见原因"                  "$WORK/log-up-rc" "端口被占"
+refute "不再谎称等过预算"              "$WORK/log-up-rc" "网关未在"
+# 容器没起来，那份日志是空的：把人指过去只是多浪费一步
+refute "不把人指向空的 lc logs"        "$WORK/log-up-rc" "lc logs"
+refute "失败时不冒充就绪"              "$WORK/log-up-rc" "网关就绪"
+refute "失败时没有 traceback"          "$WORK/log-up-rc" "Traceback (most recent call last)"
+
+echo "[3g] compose 报非零但网关其实活着：不误杀"
+# `--force-recreate` 删旧容器时可能报个无害的错。多一次 HTTP 探测换掉这个误伤，
+# 否则「看退出码」这个修复会把一批本来能用的启动判成失败。
+start_gw gw_http.py
+elapsed_of 5 "$WORK/log-up-rc2" up
+cat "$WORK/log-up-rc2"
+[ "$RC" -eq 0 ] \
+  && pass "网关活着时不因为 compose 的退出码失败" \
+  || fail "网关明明活着，lc up 却因为 compose 退出码 1 判了死刑（RC=$RC）"
+assert "照常给出就绪回执"        "$WORK/log-up-rc2" "网关就绪"
+# 但不能一声不吭：那个非零退出码仍然是个信号，用户该知道
+assert "同时提了 compose 的退出码" "$WORK/log-up-rc2" "退出码 1"
+refute "不再报 compose up 失败"    "$WORK/log-up-rc2" "docker compose up 失败"
+export DOCKER_RC=0
+
 echo "[3h] 等待预算按墙上时钟算，不按轮数（issue #35）"
 # 黑洞桩：accept 之后从不回应，探活只能等到自己的超时。这是内网最常见的不可达
 # 形态（防火墙对未放行端口 DROP 而不是 REJECT），也是原实现偏差最大的地方——
@@ -370,6 +416,9 @@ start_gw gw_blackhole.py
 elapsed_of 2 "$WORK/log-up-bh" up
 cat "$WORK/log-up-bh"
 assert "黑洞网关最终被判为未就绪" "$WORK/log-up-bh" "❌ 网关未在 2s 内就绪"
+[ "$RC" -ne 0 ] \
+  && pass "黑洞网关下 lc up 以非零退出码收场（RC=$RC）" \
+  || fail "黑洞网关下 lc up 退了 0"
 # 按轮数算的话这里是 2 × (探活 5s + sleep 1s) = 12s。这条断言直接钉住
 # 「预算是墙上时钟」这个不变量，改回轮数模型就会红。
 [ "$ELAPSED" -lt 8 ] \

@@ -29,7 +29,11 @@ LC_GATEWAY_WAIT=120 ./bin/lc up
 
 The limit is a wall-clock budget: `lc up` returns within roughly that many seconds whether the health probe fails instantly (nothing listening) or hangs until it times out (a firewall dropping packets). Each individual probe is also capped by the remaining budget, so a very small value shortens the probes themselves.
 
-The gateway keeps starting either way — the timeout only bounds how long `lc up` watches it. `./bin/lc status` re-checks at any time.
+The gateway keeps starting either way — the timeout only bounds how long `lc up` watches it. `./bin/lc status` re-checks at any time. `lc up` exits non-zero when the gateway never answers, so `lc up && lc test` stops instead of testing a gateway that is not there.
+
+## `lc up` fails immediately with a Docker error
+
+When `docker compose up` itself fails, `lc up` stops right there and reports the exit code instead of waiting out the budget. The real cause is in Docker's own output just above: an already-allocated gateway port, an image that was never `docker load`ed, or a malformed compose file. Read that output rather than `lc logs` — no container started, so there is nothing in the log.
 
 ## Upstream returns 404 or `Unsupported model`
 

@@ -599,8 +599,21 @@ def cmd_rm(argv):
 def cmd_up(argv):
     reg = load_registry()
     sync(reg, quiet=True)
-    compose("up", "-d", "--force-recreate")
+    rc = compose("up", "-d", "--force-recreate")
     budget = gw_wait_seconds()
+    if rc != 0:
+        # docker 自己已经把失败原因（端口被占、镜像没 load、compose 语法错）打在
+        # 上面了。原来这个退出码被丢掉，于是一个已经诊断清楚的错误变成了 45 秒
+        # 之后的一句「看日志: lc logs」——而容器根本没起来，那份日志是空的。
+        #
+        # 仍然探活一次再决定：`--force-recreate` 删旧容器时可能报个无害的错，而
+        # 网关其实是活的。多一次 HTTP 探测换掉这个误伤。
+        if gw_alive(reg):
+            warn("docker compose 退出码 %d（原话在上面），但网关是活的，继续" % rc)
+            ok("网关就绪 %s" % gw_url(reg))
+            return
+        die("docker compose up 失败（退出码 %d），上面是 docker 的原话。"
+            "常见原因：网关端口被占、镜像没 docker load、compose 文件语法错" % rc)
     n = wait_gw(reg, budget)
     if n:
         ok("网关就绪 (%ds) %s" % (n, gw_url(reg)))
@@ -611,6 +624,8 @@ def cmd_up(argv):
     if budget == GW_WAIT_DEFAULT:
         say("  %s机器慢的话可以调大：LC_GATEWAY_WAIT=120 lc up%s"
             % (C["d"], C["x"]))
+    # 非零退出码：`lc up && lc test` 和站点部署脚本要能判断网关到底起没起。
+    sys.exit(1)
 
 
 def cmd_down(argv):
