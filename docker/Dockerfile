@@ -12,7 +12,7 @@
 #     -e MODEL=your-model-name \
 #     airgap-coder:0.145.0 exec "重构 foo.py"
 
-FROM node:22-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436
+FROM node:26-slim@sha256:4ebb5ace66f15a24c14c492e01a8beeed4fddf970a856109f5126e703e5fe503
 
 # 版本锁死。Codex 有过单方面移除 wire_api="chat" 的先例，
 # 隔离网环境不应该留自动更新的口子。
