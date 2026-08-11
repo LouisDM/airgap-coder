@@ -20,12 +20,18 @@ git clone https://github.com/LouisDM/airgap-coder.git
 cd airgap-coder
 git checkout "$(git tag --sort=-version:refname | head -1)"
 
-docker build -t airgap-coder:0.145.0 -f docker/Dockerfile .
+docker build -t airgap-coder:0.1.0 -f docker/Dockerfile .
 docker pull ghcr.io/berriai/litellm:main-stable@sha256:90d8de0ea6fbb3cad145d1019d00a0149ae400b1e18e2011a60f1988f143f672
 ./bin/lc export
 ```
 
 Use the exact tag and digest from the release you checked out if they differ from this example. A digest, not a mutable tag, identifies the image contents.
+
+The development image tag is airgap-coder's own version, taken from the `VERSION` file — not the pinned Codex version. Two releases that ship the same Codex baseline still produce distinct tags, so an isolated environment can hold both and roll back between them. `lc export` derives the tag the same way, so an image built under a different tag is reported as missing. The Codex baseline is recorded as an image label instead:
+
+```bash
+docker inspect --format '{{index .Config.Labels "io.airgap-coder.codex-version"}}' airgap-coder:0.1.0
+```
 
 If the isolated environment already has both images and only tracked source changed, create a smaller source bundle:
 
@@ -44,7 +50,7 @@ For a generic bundle intended for multiple sites, omit the local model registry:
 The export command prints the output path. Inspect its top-level contents and verify that site-specific files are absent:
 
 ```bash
-BUNDLE=airgap-coder-0.145.0-YYYYMMDD-HHMMSS.tar.gz
+BUNDLE=airgap-coder-0.1.0-YYYYMMDD-HHMMSS.tar.gz
 tar tzf "$BUNDLE" | sed -n '1,80p'
 ```
 
@@ -64,9 +70,9 @@ The bundle must not contain `.env`, generated `codex/` or `litellm/` configurati
 After the bundle passes the required organizational review, move it through the approved media or transfer service. In the isolated environment:
 
 ```bash
-BUNDLE=airgap-coder-0.145.0-YYYYMMDD-HHMMSS.tar.gz
+BUNDLE=airgap-coder-0.1.0-YYYYMMDD-HHMMSS.tar.gz
 tar xzf "$BUNDLE"
-cd airgap-coder-0.145.0-YYYYMMDD-HHMMSS
+cd airgap-coder-0.1.0-YYYYMMDD-HHMMSS
 ./install.sh
 ./bin/lc init
 ./bin/lc up
@@ -85,7 +91,7 @@ docker run --rm -it -v "$PWD:/workspace" \
   -e GATEWAY_URL=http://gateway.your-intranet.local:4000/v1 \
   -e GATEWAY_KEY=your-gateway-key \
   -e MODEL=your-model \
-  airgap-coder:0.145.0 exec "inspect this repository"
+  airgap-coder:0.1.0 exec "inspect this repository"
 ```
 
 The mount gives Codex access to the current workspace. In `exec` mode the image disables Codex's built-in sandbox because its Landlock/seccomp sandbox is not reliable inside many container runtimes. Treat the container as the isolation boundary: mount only the required workspace, keep sensitive host paths out, and apply your runtime's user, capability, network, and filesystem restrictions.

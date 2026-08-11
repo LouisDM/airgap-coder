@@ -20,6 +20,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- Offline bundle names and the development image tag now use airgap-coder's own `VERSION` instead of the pinned Codex version, so successive releases no longer collide on a single `airgap-coder:0.145.0` tag in an isolated environment. The Codex baseline moved to an image label and a dedicated manifest line.
 - `lc up` now stops immediately when `docker compose up` fails, reports the exit code instead of pointing at an empty `lc logs`, and exits non-zero when the gateway never becomes reachable.
 - `LC_GATEWAY_WAIT` is now a wall-clock budget rather than a probe count, so an unreachable gateway behind a packet-dropping firewall no longer takes six times the advertised limit.
 - Doctor probe tests now isolate their fake Codex executable from a host installation.
