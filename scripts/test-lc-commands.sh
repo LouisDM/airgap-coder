@@ -38,8 +38,11 @@ cleanup() {
 trap cleanup EXIT
 
 SRC="$WORK/repo"
-mkdir -p "$SRC/bin" "$WORK/bin"
+mkdir -p "$SRC/bin" "$SRC/scripts" "$WORK/bin"
 cp "$REPO/bin/lc" "$SRC/bin/lc"
+# lc e2e 会去调它。这个脚本本身要真模型才跑得完（所以是 ci-exempt），但它启动
+# Codex 之前那段「往子进程里放哪些环境变量」用假 codex 桩就能钉住，见 [6e]。
+cp "$REPO/scripts/test-codex.sh" "$SRC/scripts/test-codex.sh"
 LC=("python3" "$SRC/bin/lc")
 REG="$SRC/registry.json"
 ENVF="$SRC/.env"
@@ -573,14 +576,18 @@ assert "透传了额外参数给 docker compose" "$DOCKER_LOG" "compose logs -f 
 echo "[6] lc code：网关没起来就别启动 Codex，CODEX_HOME 不许指向 ~/.codex"
 # 假 codex：把 CODEX_HOME 和 argv 记进文件，同时留一个「我被启动过」的痕迹。
 # 光看输出不够——要断言的是「没起来时压根没启动 Codex」。
+# 另外把整份环境 dump 出来，[6c] 要按值搜哨兵（issue #42）。
 cat > "$WORK/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 { echo "CODEX_HOME=$CODEX_HOME"; echo "argv=$*"; } >> "$CODEX_LOG"
+env | sort > "$CODEX_ENV_LOG"
 exit 0
 EOF
 chmod +x "$WORK/bin/codex"
 export CODEX_LOG="$WORK/codex.log"
+export CODEX_ENV_LOG="$WORK/codex.env"
 : > "$CODEX_LOG"
+: > "$CODEX_ENV_LOG"
 
 echo "[6a] 网关不可达：不启动 Codex"
 # 网关桩在 [3h] 末尾已经停掉了，这个端口现在没人监听。
@@ -605,6 +612,69 @@ assert "CODEX_HOME 指向仓库内的 codex/" "$CODEX_LOG" "CODEX_HOME=$SRC/code
 refute "CODEX_HOME 不是用户的 ~/.codex" "$CODEX_LOG" "$HOME/.codex"
 assert "带上了当前默认上游的 profile"    "$CODEX_LOG" "--profile beta"
 assert "透传了额外参数给 codex"          "$CODEX_LOG" "--sandbox read-only"
+
+echo "[6c] lc code 只把 Codex 声明要用的 env_key 交给它，不是整份 .env（issue #42）"
+# 这个子进程是 approval_policy = "never" 的 Codex：模型输出的 shell 命令直接执行。
+# 整份 .env 注入进去，工作区里一个带提示注入的文件就能让它 `env` 读走所有上游的
+# 凭证和内网地址——包括当前 profile 根本没在用的那些。
+# 钉的是「没多给」，不是「给够了」——前者才是这条 issue 的不变量。
+assert "provider 的 env_key 传下去了"        "$CODEX_ENV_LOG" "LITELLM_MASTER_KEY=sk-$CANARY_MK"
+refute "没带上当前上游的 API Key"            "$CODEX_ENV_LOG" "$CANARY_KEY"
+refute "没带上自定义 HTTP 头的值"            "$CODEX_ENV_LOG" "$CANARY_HDR"
+refute "没带上其它上游的内网地址"            "$CODEX_ENV_LOG" "beta.your-intranet.local"
+if grep -q '^KEY_' "$CODEX_ENV_LOG"; then
+  grep '^KEY_' "$CODEX_ENV_LOG" | sed 's/=.*/=<省略>/'
+  fail "Codex 的环境里还有 KEY_* 上游凭证变量"
+else
+  pass "Codex 的环境里一个 KEY_* 都没有"
+fi
+
+echo "[6d] 变异测试：把整份 .env 注入的写法改回去，[6c] 必须变红"
+# 没有这条，[6c] 可能只是碰巧绿的（比如哨兵拼错、env dump 没生成）。
+MUT="$WORK/mutant"
+rm -rf "$MUT"; cp -r "$SRC" "$MUT"
+python3 - "$MUT/bin/lc" <<'PY'
+import sys
+p = sys.argv[1]
+src = open(p, encoding="utf-8").read()
+old = ("    for k in sorted(needed):\n"
+       "        if k in src:\n"
+       "            env[k] = src[k]\n")
+if old not in src:
+    # 重构过就直接红，而不是让变异测试静默失效、[6c] 从此没人替它把关
+    sys.exit("::error::变异测试找不到注入点，codex_env() 被改过了——请同步更新本处")
+open(p, "w", encoding="utf-8").write(src.replace(old, "    env.update(src)\n"))
+PY
+: > "$CODEX_ENV_LOG"
+NO_COLOR=1 PATH="$WORK/bin:$PATH" python3 "$MUT/bin/lc" code < /dev/null > "$WORK/log-code-mut" 2>&1 || true
+if grep -qF "$CANARY_KEY" "$CODEX_ENV_LOG"; then
+  pass "变异版本确实泄漏了上游凭证，说明 [6c] 真的在把关"
+else
+  cat "$WORK/log-code-mut"
+  fail "变异版本也没泄漏——[6c] 的断言是空的，没在测东西"
+fi
+rm -rf "$MUT"
+
+echo "[6e] lc e2e 走的是另一条路（test-codex.sh），同样不许整份 source .env"
+# test-codex.sh 真跑完要活网关和真模型，所以它是 ci-exempt；但「给 Codex 哪些
+# 环境变量」这一段在启动 codex 之前就定了，用同一个假桩就能钉住。后面的结果
+# 校验必然失败（桩不会真去改 calc.py），退出码不看。
+: > "$CODEX_ENV_LOG"
+run_any "$WORK/log-e2e-env" e2e alpha
+if [ -s "$CODEX_ENV_LOG" ]; then
+  assert "e2e 也传了 provider 的 env_key"  "$CODEX_ENV_LOG" "LITELLM_MASTER_KEY=sk-$CANARY_MK"
+  refute "e2e 没带上上游的 API Key"        "$CODEX_ENV_LOG" "$CANARY_KEY"
+  refute "e2e 没带上自定义 HTTP 头的值"    "$CODEX_ENV_LOG" "$CANARY_HDR"
+  if grep -q '^KEY_' "$CODEX_ENV_LOG"; then
+    grep '^KEY_' "$CODEX_ENV_LOG" | sed 's/=.*/=<省略>/'
+    fail "e2e 起的 Codex 环境里还有 KEY_* 上游凭证变量"
+  else
+    pass "e2e 起的 Codex 环境里一个 KEY_* 都没有"
+  fi
+else
+  cat "$WORK/log-e2e-env"
+  fail "e2e 压根没走到启动 Codex 那一步，这条断言等于没测"
+fi
 stop_gw
 
 # ─────────────────────────────────────────────────────────────────────────

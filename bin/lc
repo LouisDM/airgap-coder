@@ -730,15 +730,55 @@ def cmd_e2e(argv):
     sys.exit(rc)
 
 
+def codex_env_keys():
+    """Codex 配置里声明要用的环境变量名。
+
+    只按名字取，不按前缀过滤：provider 将来换了 env_key 名字、或者多加一个
+    provider，这里自动跟上，不会漏。config.toml 与 *.config.toml 都是
+    `lc sync` 生成的，所以这个解析不依赖用户手写的格式。
+    """
+    names = set()
+    for f in [CODEX_DIR / "config.toml"] + sorted(CODEX_DIR.glob("*.config.toml")):
+        if f.is_file():
+            names |= set(re.findall(r'^\s*env_key\s*=\s*"([^"]+)"',
+                                    f.read_text(encoding="utf-8"), re.M))
+    return names
+
+
+def codex_env():
+    """给 Codex 子进程的环境。
+
+    关键在于**不要**把整份 .env 交出去（issue #42）。Codex 不是普通子进程：
+    生成的配置是 approval_policy = "never"，也就是模型输出的 shell 命令无需
+    批准直接执行。整份 .env 注入进去，工作区里一个带提示注入的文件就能让它
+    `env` 读走所有上游的 API Key、内网地址和自定义头的值——包括当前 profile
+    根本没在用的那些上游。而 Codex 实际只用得到 provider 声明的 env_key。
+
+    容器那条路径本来就是最小集（entrypoint 只设 LITELLM_MASTER_KEY），宿主机
+    这条对齐过来。
+    """
+    env = dict(os.environ)
+    env["CODEX_HOME"] = str(CODEX_DIR)
+    src = read_env()
+    needed = codex_env_keys()
+    for k in sorted(needed):
+        if k in src:
+            env[k] = src[k]
+    missing = sorted(k for k in needed if not env.get(k))
+    if missing:
+        die("Codex 要用的 %s 在 .env 里没有值。跑 `lc init` 补齐后再 `lc up` 重启网关。\n"
+            "   （不带它启动只会在网关那里撞 401，看起来像模型的问题）"
+            % "、".join(missing))
+    return env
+
+
 def cmd_code(argv):
     reg = load_registry()
     if not gw_alive(reg):
         die("网关没起来，先跑 `lc up`")
-    env = dict(os.environ)
-    env["CODEX_HOME"] = str(CODEX_DIR)
-    env.update(read_env())
     profile = reg.get("default")
-    sys.exit(subprocess.call(["codex", "--profile", profile] + list(argv), env=env))
+    sys.exit(subprocess.call(["codex", "--profile", profile] + list(argv),
+                             env=codex_env()))
 
 
 def _dev_image_ref():
