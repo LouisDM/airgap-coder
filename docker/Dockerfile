@@ -12,7 +12,11 @@
 #     -e MODEL=your-model-name \
 #     airgap-coder:0.145.0 exec "重构 foo.py"
 
-FROM node:22-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436
+# 基础镜像跟 Node 的 Active LTS，不跟 Current。这个镜像构建一次就 docker save
+# 搬进内网，之后没有更新路径——内网里发现问题没法 pull 补救。所以稳定性和长期
+# 安全支持优先于新特性，和下面锁死 CODEX_VERSION 是同一个理由。
+# 用 digest 固定：node:24-slim 这个 tag 会随小版本移动，两次构建可能拿到不同镜像。
+FROM node:24-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03
 
 # 版本锁死。Codex 有过单方面移除 wire_api="chat" 的先例，
 # 隔离网环境不应该留自动更新的口子。
