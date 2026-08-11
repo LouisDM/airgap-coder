@@ -19,6 +19,7 @@ airgap-coder-*.tar.gz
 
 # 测试沙箱
 .smoke/
+.codex-review/
 
 .DS_Store
 __pycache__/

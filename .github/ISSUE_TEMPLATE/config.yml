@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/LouisDM/airgap-coder/security/advisories/new
+    about: Report vulnerabilities privately. Do not open a public issue.
+  - name: Setup and usage questions
+    url: https://github.com/LouisDM/airgap-coder/discussions
+    about: Ask for help after removing all credentials and private data.

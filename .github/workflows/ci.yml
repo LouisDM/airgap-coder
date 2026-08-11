@@ -17,23 +17,34 @@ on:
 jobs:
   static:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.9"   # 与 macOS 自带版本对齐，避免用到更新的语法
 
       - name: Python 语法检查
-        run: python3 -m py_compile bin/lc scripts/smoke.py scripts/probe.py
+        run: python3 -m py_compile bin/lc scripts/*.py
 
       - name: Shell 语法检查
-        run: bash -n scripts/test-codex.sh docker/entrypoint.sh scripts/smoke.sh scripts/test-doctor-probe.sh scripts/test-export.sh scripts/test-lc-secrets.sh
+        run: bash -n scripts/*.sh docker/entrypoint.sh
 
       - name: CLI 可执行
         run: |
           python3 bin/lc --help
           python3 bin/lc help
+          bash scripts/test-version.sh
+
+      - name: 开源项目元数据与供应链约束
+        run: python3 scripts/test-project-metadata.py
+
+      - name: 容器入口与本地 Codex 审查包装器
+        run: |
+          bash scripts/test-entrypoint.sh
+          bash scripts/test-codex-review-script.sh
 
       - name: doctor 的 tool calling 探测
         # issue #1 的门禁：桩上游按 7 种方式作答，断言 doctor 每个判定分支。
@@ -126,8 +137,10 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: 构建离线开发镜像
         run: docker build -f docker/Dockerfile -t airgap-coder:ci .
       - name: entrypoint 缺参数时应当明确报错
@@ -137,3 +150,6 @@ jobs:
           else
             echo "::error::entrypoint 没有校验必需的环境变量"; exit 1
           fi
+
+      - name: 无 GPU 的 Responses → Chat Completions 桥接
+        run: bash scripts/test-litellm-bridge.sh

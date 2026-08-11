@@ -1,0 +1,36 @@
+name: Compatibility report
+description: Share a reproducible backend result
+title: "[Compatibility]: "
+labels: ["compatibility", "needs-triage"]
+body:
+  - type: textarea
+    id: versions
+    attributes:
+      label: Exact versions
+      description: airgap-coder, Codex, LiteLLM digest, inference server, model, quantization, tool parser, and template.
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Verified
+        - Partial
+        - Known incompatible
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted evidence
+      description: Summarize `lc doctor`, `lc test`, and `lc e2e` results without private data.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, private endpoints, prompts, and proprietary source.
+          required: true
