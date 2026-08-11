@@ -337,7 +337,7 @@ PY
 PINNED="$(sed -n 's#^[[:space:]]*image:[[:space:]]*\(ghcr.io/berriai/litellm[^[:space:]]*\).*#\1#p' \
   "$OUT/compose.repo.yml" | head -1)"
 test -n "$PINNED" || { echo "::error::读不出仓库里 compose 的网关镜像引用"; exit 1; }
-parse_image "$PINNED"                       "仓库当前的写法（$PINNED）"
+parse_image "$PINNED"                       "仓库当前的写法（${PINNED}）"
 parse_image "ghcr.io/berriai/litellm@sha256:0000000000000000000000000000000000000000000000000000000000000000" \
                                             "纯 digest 写法"
 parse_image "ghcr.io/berriai/litellm:main-stable" "纯 tag 写法（旧格式仍能读）"
