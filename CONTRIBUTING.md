@@ -28,7 +28,8 @@ Never commit `.env`, generated `codex/` profiles, generated `litellm/config.yaml
 - Keep each pull request focused and explain the user-visible effect.
 - Add a regression test for behavior changes.
 - Preserve Python 3.9 compatibility and the standard-library-only rule for `bin/lc` and `scripts/*.py`.
-- Update both READMEs when changing user-facing commands or security behavior.
+- Keep the English and Simplified Chinese READMEs structurally equivalent when changing user-facing commands, requirements, security behavior, or compatibility claims.
+- Put detailed operational material in `docs/` and add it to `docs/README.md` instead of making the quick start difficult to scan.
 - Record compatibility claims with the exact Codex, LiteLLM, inference server, model, and result.
 - Run the local checks below and paste the results into the pull request template.
 

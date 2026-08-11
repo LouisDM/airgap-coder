@@ -13,6 +13,7 @@ REQUIRED = [
     "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md",
     "SUPPORT.md", "docs/architecture.md", "docs/compatibility.md",
     "docs/threat-model.md", "docs/adopters.md", "docs/codex-workflow.md",
+    "docs/README.md", "docs/offline-deployment.md", "docs/troubleshooting.md",
     ".github/pull_request_template.md",
     ".github/ISSUE_TEMPLATE/bug.yml",
     ".github/ISSUE_TEMPLATE/feature.yml",
@@ -51,6 +52,39 @@ def main():
             if not linked.exists():
                 failures += fail("broken local link in %s: %s" %
                                  (document.relative_to(ROOT), target))
+
+    readme = (ROOT / "README.md").read_text()
+    readme_zh = (ROOT / "README.zh-CN.md").read_text()
+    required_readme_targets = [
+        "docs/README.md", "docs/architecture.md", "docs/compatibility.md",
+        "docs/offline-deployment.md", "docs/troubleshooting.md",
+        "docs/threat-model.md", "docs/codex-workflow.md",
+    ]
+    for target in required_readme_targets:
+        for name, content in (("README.md", readme), ("README.zh-CN.md", readme_zh)):
+            if "](%s)" % target not in content:
+                failures += fail("%s does not link to %s" % (name, target))
+
+    if "README.zh-CN.md" not in readme or "README.md" not in readme_zh:
+        failures += fail("README language switch is incomplete")
+
+    readme_commands = (
+        "lc init", "lc up", "lc test", "lc code", "lc doctor", "lc e2e",
+        "lc export", "lc version",
+    )
+    for command in readme_commands:
+        if command not in readme or command not in readme_zh:
+            failures += fail("bilingual READMEs do not both document %s" % command)
+
+    english_sections = re.findall(r"^## .+$", readme, re.MULTILINE)
+    chinese_sections = re.findall(r"^## .+$", readme_zh, re.MULTILINE)
+    if len(english_sections) != len(chinese_sections):
+        failures += fail("bilingual README section counts differ: %d != %d" %
+                         (len(english_sections), len(chinese_sections)))
+
+    command_row = "| `lc "
+    if readme.count(command_row) != readme_zh.count(command_row):
+        failures += fail("bilingual README command tables have different row counts")
 
     action_pattern = re.compile(r"^\s*-\s+uses:\s+[^\s]+@([^\s#]+)", re.MULTILINE)
     sha_pattern = re.compile(r"^[0-9a-f]{40}$")

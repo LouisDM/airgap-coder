@@ -33,11 +33,12 @@ Maintainers may list a backend as:
 - **known incompatible**: a reproducible failure is understood;
 - **unverified**: configuration guidance exists without a reproducible report.
 
-## Current reports
+## Current verified reports
 
 | Backend | Model | Result | Evidence |
 |---|---|---|---|
-| GPU-free mock server | Deterministic fixture | Bridge test | Repository integration test |
-| Alibaba Cloud Model Studio | qwen3-32b | Partial, small sample | Maintainer notes in [README.zh-CN.md](../README.zh-CN.md#实测记录) |
+| GPU-free mock server | Deterministic fixture | Bridge verified | [`scripts/test-litellm-bridge.sh`](../scripts/test-litellm-bridge.sh) in CI |
 
-No entry is an endorsement. Results may change across model, template, parser, inference-server, and Codex versions.
+Informal maintainer experiments are not listed as verified backends until they include the exact versions and redacted evidence required above. No entry is an endorsement. Results may change across model, template, parser, inference-server, and Codex versions.
+
+For common failure patterns, see [troubleshooting](troubleshooting.md).
