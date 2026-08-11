@@ -171,8 +171,21 @@ if command -v docker >/dev/null 2>&1 &&
      docker build -q -t airgap-coder:test-tiny - >/dev/null 2>&1; then
   echo "[5] 带镜像导出（用 hello-world 当镜像替身）"
   sed -i.bak 's/^ARG CODEX_VERSION=.*/ARG CODEX_VERSION=test-tiny/' "$SRC/docker/Dockerfile"
-  sed -i.bak 's#^[[:space:]]*image: ghcr.io/berriai/litellm:.*#    image: hello-world:latest#' \
+  # 替身按「仓库前缀」整行替换，不匹配 tag 或 digest 的形态（issue #13）。
+  # 写死成 `litellm:` 的话，compose 换成纯 digest 形式（repo@sha256:…）后这条
+  # sed 就不再匹配，替身没换上，export 会去找那个真实 digest 的镜像、本机没有、
+  # 按设计拒绝打包——而报错说的是「本机没有镜像」，读的人不会想到根因是测试
+  # 脚本里一条 sed 没匹配上。
+  #
+  # 替身本身也用 tag@digest 形式，和生产 compose 保持一致：export 要把这个
+  # 引用交给 docker image inspect / docker save，形态不同真的会有差别。
+  HW_DIGEST="$(docker image inspect hello-world:latest \
+    --format '{{index .RepoDigests 0}}' | sed 's/.*@//')"
+  test -n "$HW_DIGEST" || { echo "::error::读不出 hello-world 的 RepoDigest"; exit 1; }
+  sed -i.bak "s#^[[:space:]]*image: ghcr.io/berriai/litellm.*#    image: hello-world:latest@$HW_DIGEST#" \
     "$SRC/docker-compose.yml"
+  grep -q "image: hello-world:latest@sha256:" "$SRC/docker-compose.yml" \
+    || { echo "::error::替身没换上，后面的断言测的不是想测的东西"; exit 1; }
   NO_COLOR=1 python3 "$SRC/bin/lc" export --out "$OUT/full.tar.gz" \
     > "$OUT/log3" 2>&1 || { cat "$OUT/log3"; echo "::error::带镜像导出失败"; exit 1; }
   cat "$OUT/log3"
@@ -180,6 +193,12 @@ if command -v docker >/dev/null 2>&1 &&
   tar tzf "$OUT/full.tar.gz" > "$LIST"
   check assert "images/airgap-coder.tar.gz" "开发镜像 tar 在包里"
   check assert "images/litellm.tar.gz"      "网关镜像 tar 在包里"
+  # digest 固定的引用要一路走通 docker image inspect 与 docker save。这两步
+  # 只在带镜像那条路上发生，而它是唯一一次跨隔离网搬运——取错或取不到都要到
+  # 内网才发现。
+  LIST="$OUT/log3"
+  check assert "hello-world:latest@sha256:" "digest 固定的网关引用被原样取到并用于打包"
+  LIST="$OUT/list3"
   check assert "/SHA256SUMS"                "有 SHA256SUMS 供内网侧核完整性"
 
   mkdir -p "$OUT/y" && tar xzf "$OUT/full.tar.gz" -C "$OUT/y"
@@ -290,6 +309,51 @@ else
     || echo "  ✅ 拒绝之后没有留下产物"
 fi
 cp "$OUT/registry.clean.json" "$SRC/registry.json"
+
+echo "[8] compose 里的网关镜像：三种写法都要解析对（issue #13）"
+# docker-compose.yml 已经用 digest 固定网关镜像。_compose_litellm_image() 是
+# 按服务名逐行扫的手写解析器，取错了会把不相干的镜像打进包，而这种错要到内网
+# 才发现。三种合法写法都钉住，以后换成纯 digest 也不会静默走样。
+#
+# 不需要 docker：--no-images 只要求解析出镜像名，不要求本机真有那个镜像。
+# 基准取自仓库里那份 compose，不是 $SRC 那份——[5] 已经把 $SRC 的镜像换成替身了
+cp "$REPO/docker-compose.yml" "$OUT/compose.repo.yml"
+parse_image() {   # parse_image <compose 里 litellm 的 image: 值> <说明>
+  python3 - "$SRC/docker-compose.yml" "$1" <<'PY'
+import sys
+# 保留诱饵服务：它排在 litellm 前面，解析器不能取「第一条 image:」
+open(sys.argv[1], "w", encoding="utf-8").write(
+    "services:\n"
+    "  decoy-proxy:\n    image: decoy/never-package-me:1.0\n"
+    "  litellm:\n    image: %s\n    container_name: gw\n" % sys.argv[2])
+PY
+  NO_COLOR=1 python3 "$SRC/bin/lc" export --no-images --no-registry \
+    --out "$OUT/parse.tar.gz" > "$OUT/log-parse" 2>&1 \
+    || { cat "$OUT/log-parse"; echo "::error::解析 $1 时导出失败"; exit 1; }
+  LIST="$OUT/log-parse"
+  check assert "网关镜像 : $1" "$2"
+  check refute "decoy/never-package-me" "$2：没被前面的诱饵服务带偏"
+}
+PINNED="$(sed -n 's#^[[:space:]]*image:[[:space:]]*\(ghcr.io/berriai/litellm[^[:space:]]*\).*#\1#p' \
+  "$OUT/compose.repo.yml" | head -1)"
+test -n "$PINNED" || { echo "::error::读不出仓库里 compose 的网关镜像引用"; exit 1; }
+parse_image "$PINNED"                       "仓库当前的写法（$PINNED）"
+parse_image "ghcr.io/berriai/litellm@sha256:0000000000000000000000000000000000000000000000000000000000000000" \
+                                            "纯 digest 写法"
+parse_image "ghcr.io/berriai/litellm:main-stable" "纯 tag 写法（旧格式仍能读）"
+cp "$OUT/compose.repo.yml" "$SRC/docker-compose.yml"
+
+# 仓库里那份 compose 必须是 digest 固定的。scripts/test-project-metadata.py 已经
+# 有一条同样的断言；这里再钉一次是因为 export 是唯一一次跨隔离网搬运，
+# 「两台机器 docker compose pull 拿到不同网关」的后果发生在没有外网的那一侧。
+if grep -qE '^[[:space:]]*image:[[:space:]]*ghcr.io/berriai/litellm[^[:space:]]*@sha256:[0-9a-f]{64}' \
+     "$OUT/compose.repo.yml"; then
+  echo "  ✅ docker-compose.yml 的网关镜像由 digest 固定，不是移动 tag"
+else
+  echo "  ❌ docker-compose.yml 的网关镜像没有 digest，两台机器可能拿到不同的网关"
+  echo "::error::docker-compose.yml 的网关镜像没有 digest"
+  fails=$((fails + 1))
+fi
 
 if [ "$fails" -gt 0 ]; then
   echo "=== 失败 $fails 项 ==="
