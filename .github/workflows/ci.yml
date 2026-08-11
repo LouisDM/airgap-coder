@@ -34,7 +34,11 @@ jobs:
         run: |
           set -euo pipefail
           miss=0
-          for f in scripts/test-*.sh; do
+          # 命名约定：`test-*`（连字符）是独立测试，必须被 CI 执行；
+          # `test_*`（下划线）是被其它测试引用的辅助模块，不单独跑
+          # （例如 test_bridge_client.py 由 test-litellm-bridge.sh 在容器里调用）。
+          for f in scripts/test-*.sh scripts/test-*.py; do
+            [ -e "$f" ] || continue
             base=$(basename "$f")
             # 确实跑不了的脚本在自己头部写 `# ci-exempt: <理由>` 显式豁免，
             # 理由跟着脚本走，不散落在 ci.yml 里
@@ -43,7 +47,7 @@ jobs:
               continue
             fi
             # 只认「作为命令被执行」的引用，写在注释里不算
-            grep -qE "run:[^#]*\b(bash|sh)[[:space:]]+scripts/$base\b" .github/workflows/ci.yml \
+            grep -qE "run:[^#]*\b(bash|sh|python3?)[[:space:]]+scripts/$base\b" .github/workflows/ci.yml \
               || { echo "::error::$f 没有被 ci.yml 执行——它现在只是躺在仓库里"; miss=1; }
           done
           [ "$miss" -eq 0 ] && echo "✅ 所有 scripts/test-*.sh 都接进了 CI"
