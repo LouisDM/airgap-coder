@@ -52,7 +52,7 @@ cd airgap-coder
 | `lc doctor` | Diagnose proxy, connectivity, and tool-calling behavior |
 | `lc sync` | Regenerate LiteLLM and Codex configuration |
 | `lc migrate` | Move legacy plaintext header values into `.env` |
-| `lc export` | Create a checksummed, self-contained offline bundle |
+| `lc export [--no-images] [--no-registry]` | Create a checksummed, self-contained offline bundle |
 
 ## Security model
 
@@ -60,7 +60,8 @@ airgap-coder deliberately separates shareable configuration from secrets:
 
 - `.env`, generated Codex profiles, and generated LiteLLM config are ignored;
 - `registry.json` may be committed but stores only environment-variable names for private values;
-- offline export uses `git ls-files`, excludes local state, records image digests, and creates `SHA256SUMS`;
+- offline export uses `git ls-files`, excludes `.env` and generated configuration, records image digests, and creates `SHA256SUMS`;
+- the bundle carries `registry.json` so the isolated side reuses reviewed model structure instead of guessing it; export refuses to run while that file still holds plaintext header values, and `--no-registry` omits it;
 - CI exercises the secret-handling invariants without needing a model key.
 
 Read the full [threat model](docs/threat-model.md) before deploying in a sensitive environment. This project does not make an untrusted model, gateway, container runtime, or developer workstation safe by itself.
@@ -90,7 +91,7 @@ docker pull ghcr.io/berriai/litellm:main-stable@sha256:90d8de0ea6fbb3cad145d1019
 ./bin/lc export
 ```
 
-Move the resulting archive into the isolated network, extract it, and run `./install.sh`. The installer verifies checksums before loading images. Use `./bin/lc export --no-images` when only tracked source changed.
+Move the resulting archive into the isolated network, extract it, and run `./install.sh`. The installer verifies checksums before loading images. `lc init` on the isolated side then reuses the bundled `registry.json` and asks only for that site's endpoint and credential. Use `./bin/lc export --no-images` when only tracked source changed, and `--no-registry` when building one generic bundle for several sites.
 
 ## Project status and scope
 

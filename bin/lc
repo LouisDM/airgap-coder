@@ -809,9 +809,14 @@ def cmd_sync(argv):
 #     记录本机实际镜像身份，便于在隔离网两侧复核；
 #   - 镜像 tar 是 GB 级，流式落盘，不进内存。
 
-# 不管 git 怎么说，这些路径永远不进包。registry.json 也在里面：它虽然只存变量名
-# （issue #4 之后可能变成受版本控制的文件），但仍是站点特定的，不该跟着包乱跑。
-BUNDLE_NEVER = (".env", ".env.local", "registry.json", "litellm/config.yaml")
+# 不管 git 怎么说，这些路径永远不进包。
+#
+# registry.json 不在这里（issue #16）：issue #4 之后它只存结构定义与变量名，
+# 而内网侧恰恰最需要那份结构——模型 ID、上下文窗口、关思考模式的参数名，
+# 填错了不报错只静默失效，而内网没有外网可查、也没有别人的 registry 可要。
+# 「打进包会泄漏」这个顾虑由 registry 里不许有明文值这条不变量兜住（ci.yml 的
+# registry 扫描 + 下面 _registry_leaks 的导出前复核）。不想带的用 --no-registry。
+BUNDLE_NEVER = (".env", ".env.local", "litellm/config.yaml")
 BUNDLE_NEVER_DIRS = ("codex/", ".smoke/", ".codex-review/", ".git/")
 
 
@@ -892,7 +897,28 @@ def _docker_save(ref, dest):
         die("docker save %s 失败（退出码 %d）" % (ref, rc))
 
 
-def _tracked_files():
+def _registry_leaks():
+    """registry.json 里还有明文凭证吗？返回「上游: 头名」列表。
+
+    带 registry 进包之前必须复核一遍：早期版本把自定义头的值明文存在 registry
+    里（`lc migrate` 负责搬走），那种 registry 一旦跟着包跨网走，就是把凭证
+    塞进一个宣称「不含任何机密」的产物里。这是导出路径上唯一一次机会——
+    到了内网没有补救手段。
+    """
+    if not REGISTRY.is_file():
+        return []
+    try:
+        reg = json.loads(REGISTRY.read_text())
+    except ValueError as e:
+        die("registry.json 不是合法 JSON（%s），拒绝把它打进包" % e)
+    bad = []
+    for name in sorted(reg.get("upstreams") or {}):
+        for hk in legacy_headers(reg["upstreams"][name]):
+            bad.append("%s: %s" % (name, hk))
+    return bad
+
+
+def _tracked_files(never=BUNDLE_NEVER):
     """git 认为该带走的文件。用它而不是手写排除列表——.gitignore 已经是唯一真相。"""
     try:
         out = subprocess.check_output(["git", "ls-files", "-z"], cwd=str(ROOT),
@@ -904,7 +930,7 @@ def _tracked_files():
         die("`git ls-files` 没列出任何文件，拒绝打一个空包")
     keep = []
     for f in files:
-        if f in BUNDLE_NEVER or f.startswith(BUNDLE_NEVER_DIRS):
+        if f in never or f.startswith(BUNDLE_NEVER_DIRS):
             continue
         if (ROOT / f).is_file():
             keep.append(f)
@@ -946,7 +972,7 @@ done
 
 echo
 echo "✅ 镜像已就位。在当前目录接着跑："
-echo "   ./bin/lc init      # 填内网网关地址与你的 API Key"
+echo "   ./bin/lc init      # __INIT_HINT__"
 echo "   ./bin/lc up        # 起网关"
 echo "   ./bin/lc doctor    # 体检：连通性 + tool calling 真的生效"
 echo "   ./bin/lc code      # 开始用"
@@ -962,12 +988,14 @@ def cmd_export(argv):
     import tarfile
     import tempfile
 
-    out_path, want_images = None, True
+    out_path, want_images, want_registry = None, True, True
     rest = list(argv)
     while rest:
         a = rest.pop(0)
         if a == "--no-images":
             want_images = False
+        elif a == "--no-registry":
+            want_registry = False
         elif a == "--out":
             if not rest:
                 die("--out 后面要跟路径")
@@ -975,7 +1003,8 @@ def cmd_export(argv):
         elif a.startswith("--out="):
             out_path = a.split("=", 1)[1]
         else:
-            die("未知参数 '%s'。用法: lc export [--out 路径] [--no-images]" % a)
+            die("未知参数 '%s'。用法: "
+                "lc export [--out 路径] [--no-images] [--no-registry]" % a)
 
     codex_ver = _dockerfile_codex_version()
     if not codex_ver:
@@ -1014,7 +1043,24 @@ def cmd_export(argv):
     else:
         warn("--no-images：包里不含镜像，内网侧需要已经 docker load 过")
 
-    files = _tracked_files()
+    # registry.json 只存结构定义与变量名，所以默认跟着包走：内网侧最需要的就是
+    # 这份结构（模型 ID / 上下文窗口 / 关思考模式的参数名），而那台机器没有外网
+    # 可查、也没有别人的 registry 可要。带之前先复核它确实不含明文凭证。
+    never = BUNDLE_NEVER if want_registry else BUNDLE_NEVER + ("registry.json",)
+    files = _tracked_files(never)
+    if want_registry and REGISTRY.is_file():
+        leaks = _registry_leaks()
+        if leaks:
+            err("registry.json 里还有明文 header 值，拒绝把它打进包：")
+            for x in leaks:
+                say("   %s" % x)
+            die("先跑 `lc migrate` 把这些值搬进 .env（再轮换对应凭证），"
+                "或者用 `lc export --no-registry` 打一个不含 registry 的包")
+        if "registry.json" not in files:
+            # 未提交的 registry.json 也要带走：站点通常是在打包机上跑 lc init
+            # 现生成它，那份文件不在 `git ls-files` 里，但正是内网侧要沿用的那份。
+            files.append("registry.json")
+    bundled_registry = "registry.json" in files
     tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="lc-export-"))
     try:
         # 镜像先落盘到临时目录，边算 sha256 边记 digest
@@ -1036,7 +1082,34 @@ def cmd_export(argv):
             "导出时间   : %s" % datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S %z").strip(),
             "包名       : %s" % bundle_name,
             "Codex 版本 : %s  (docker/Dockerfile 的 ARG CODEX_VERSION)" % codex_ver,
-            "源码文件数 : %d  (git ls-files，已排除 .env / registry.json / 生成物)" % len(files),
+            "源码文件数 : %d  (git ls-files，已排除 .env 与生成的配置)" % len(files),
+            "",
+            "上游注册表:",
+        ]
+        # 这段措辞是给内网侧的人读的：registry.json 和 .env 的性质完全不同，
+        # 并排写在「已排除」里会让人以为它也含凭证（issue #16）。
+        if bundled_registry:
+            lines += [
+                "  registry.json 已包含。它只有结构定义：模型 ID、上下文窗口、",
+                "  最大输出、关思考模式的参数形态，以及 KEY_* 变量名。",
+                "  它不含任何凭证——地址与 API Key 在你自己要写的 .env 里。",
+                "  内网侧跑 `lc init` 时会认出这些上游，只问地址和密钥。",
+                "  如果其中某个上游在本内网根本连不上（比如打包机上用来做对比的",
+                "  托管服务），用 `lc rm <名称>` 删掉即可。",
+            ]
+        elif want_registry:
+            lines += [
+                "  本包不含 registry.json（打包机上没有这个文件）。",
+                "  内网侧需要跑 `lc init` 完整配置：模型 ID、上下文窗口、",
+                "  后端类型（决定关闭思考模式的参数名）都要现填。",
+            ]
+        else:
+            lines += [
+                "  本包不含 registry.json（--no-registry 导出）。",
+                "  内网侧需要跑 `lc init` 完整配置，或另行获取一份 registry.json",
+                "  放到解包目录根部再跑 `lc init`。",
+            ]
+        lines += [
             "",
             "镜像:",
         ]
@@ -1057,6 +1130,8 @@ def cmd_export(argv):
             "即使 tag 与 digest 同时存在，内网侧仍应以 digest 为准。",
             "",
             "内网侧: 解包后跑 ./install.sh，然后 ./bin/lc init",
+            "",
+            "本包不含 .env。地址与密钥永远不跨网搬运，由内网侧现填。",
         ]
         manifest = "\n".join(lines) + "\n"
 
@@ -1079,7 +1154,12 @@ def cmd_export(argv):
             add_bytes(tf, "MANIFEST.txt", manifest)
             if sums:
                 add_bytes(tf, "SHA256SUMS", sums)
-            add_bytes(tf, "install.sh", INSTALL_SH, mode=0o755)
+            add_bytes(tf, "install.sh", INSTALL_SH.replace(
+                "__INIT_HINT__",
+                "registry.json 已在包里，只需填地址与你的 API Key"
+                if bundled_registry else
+                "本包不含 registry.json，需完整配置（模型 ID / 上下文窗口 / 后端类型）"),
+                mode=0o755)
     finally:
         shutil.rmtree(str(tmpdir), ignore_errors=True)
 
@@ -1090,7 +1170,7 @@ def cmd_export(argv):
     leaked = []
     for n in names:
         rel = n.split("/", 1)[1] if "/" in n else n
-        if rel in BUNDLE_NEVER or rel.startswith(BUNDLE_NEVER_DIRS):
+        if rel in never or rel.startswith(BUNDLE_NEVER_DIRS):
             leaked.append(n)
     if leaked:
         out.unlink()
@@ -1099,6 +1179,12 @@ def cmd_export(argv):
     ok("离线包已生成: %s (%.1f MB)" % (out, out.stat().st_size / 1048576.0))
     say("  %s内容: 源码 %d 个文件 + %d 个镜像 + MANIFEST.txt + install.sh%s"
         % (C["d"], len(files), len(entries), C["x"]))
+    if bundled_registry:
+        say("  %s含 registry.json（结构定义，无凭证）：内网侧 lc init 只问地址与密钥%s"
+            % (C["d"], C["x"]))
+    else:
+        say("  %s不含 registry.json：内网侧 lc init 要完整配置一遍%s"
+            % (C["d"], C["x"]))
     say("  %s内网侧: tar xzf %s && cd %s && ./install.sh%s"
         % (C["d"], out.name, bundle_name, C["x"]))
 
@@ -1143,7 +1229,8 @@ COMMANDS = [
     ("doctor", cmd_doctor, "环境体检（代理劫持 + 上游 tool calling 探测）"),
     ("sync", cmd_sync, "由 registry.json 重新生成配置"),
     ("migrate", cmd_migrate, "把 registry 里遗留的明文 header 值搬进 .env"),
-    ("export", cmd_export, "打离线包: lc export [--out 路径] [--no-images]"),
+    ("export", cmd_export,
+     "打离线包: lc export [--out 路径] [--no-images] [--no-registry]"),
 ]
 
 

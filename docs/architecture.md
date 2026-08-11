@@ -36,4 +36,4 @@ Codex sends Responses API requests. The generated LiteLLM model entry sets `use_
 
 ## Offline release flow
 
-The staging host builds or pulls the required images, then `lc export` packages tracked source, image archives, an installer, a manifest, image digests, and checksums. It intentionally excludes local secrets and generated state. The isolated host verifies checksums before loading images.
+The staging host builds or pulls the required images, then `lc export` packages tracked source, image archives, an installer, a manifest, image digests, and checksums. It intentionally excludes `.env` and generated state. `registry.json` is included by default so the isolated side inherits reviewed model structure; export aborts while that file still contains plaintext header values, and `--no-registry` omits it. The isolated host verifies checksums before loading images.
