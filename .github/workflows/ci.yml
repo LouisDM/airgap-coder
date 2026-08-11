@@ -53,8 +53,8 @@ jobs:
 
       - name: lc export 的包内容校验
         # issue #5 的门禁。这个包是唯一一次跨隔离网传递，到了内网没有补救手段，
-        # 所以重点断言 .env / registry.json / 生成物 / 会话库一个都没进包，
-        # 并真跑一遍 install.sh。
+        # 所以重点断言 .env / 生成物 / 会话库不进包，并验证 registry 默认包含、
+        # --no-registry 可排除、旧版明文 header 会阻断导出，最后真跑 install.sh。
         run: bash scripts/test-export.sh
 
       - name: 机密只进 .env 这个不变量

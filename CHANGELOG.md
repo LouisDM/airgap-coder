@@ -9,11 +9,20 @@ All notable changes to this project are documented here. The format follows [Kee
 - English project entry point and expanded contributor documentation.
 - Security policy, threat model, compatibility policy, and opt-in adopter registry.
 - Release, supply-chain, and local Codex review foundations.
+- Documentation index, offline deployment guide, and troubleshooting guide.
+
+### Changed
+
+- Rebuilt the English and Simplified Chinese READMEs around equivalent quick starts, security boundaries, verified scope, and community navigation.
+- Clarified the host-side and isolated-container Codex runtime paths.
+- Aligned offline deployment guidance with default validated-registry inclusion and the `--no-registry` opt-out.
+- Limited the compatibility matrix to reproducible reports with explicit evidence.
 
 ### Fixed
 
 - Doctor probe tests now isolate their fake Codex executable from a host installation.
 - Container entrypoint now passes exec-only flags after the `codex exec` subcommand.
+- Export image-reference tests now expand pinned image variables safely under Bash 3.2.
 
 ## [0.1.0] - 2026-08-11
 
