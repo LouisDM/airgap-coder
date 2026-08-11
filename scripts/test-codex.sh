@@ -13,7 +13,20 @@ export CODEX_HOME="$ROOT/codex"
 # Codex 对不存在的 profile 不报错，会静默回落到 config.toml 的默认 model，
 # 导致你以为在测 A 其实在测 B。这里显式挡掉。
 if [ ! -f "$CODEX_HOME/${PROFILE}.config.toml" ]; then
-  echo "❌ profile '${PROFILE}' 不存在。可用: $(ls "$CODEX_HOME"/*.config.toml 2>/dev/null | xargs -n1 basename | sed 's/\.config\.toml//' | tr '\n' ' ')"
+  # 一个 profile 都没生成时 `ls` 什么都不输出，xargs 会拿空输入去调 basename，
+  # 于是真正的那句提示前面先蹦出一行 "basename: missing operand"——读的人会
+  # 以为脚本自己坏了。改成用 for 展开，没匹配到就是空列表。
+  avail=""
+  for f in "$CODEX_HOME"/*.config.toml; do
+    [ -e "$f" ] || continue
+    n="$(basename "$f")"
+    avail="$avail ${n%.config.toml}"
+  done
+  if [ -n "$avail" ]; then
+    echo "❌ profile '${PROFILE}' 不存在。可用:$avail"
+  else
+    echo "❌ profile '${PROFILE}' 不存在，而且 $CODEX_HOME 下一个 profile 都没有。先跑 \`lc sync\`"
+  fi
   exit 2
 fi
 

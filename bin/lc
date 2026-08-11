@@ -652,20 +652,43 @@ def _run_py(script, args):
     return subprocess.call([sys.executable, str(ROOT / "scripts" / script)] + args, env=env)
 
 
+def _targets(reg, argv, cmd):
+    """把命令行上的上游名解析成一串确定存在的名字，解析不了就干净地失败。
+
+    两件事都必须挡在跑测试之前：
+
+    - 没有默认上游时 `reg.get("default")` 是 None，原来会一路传进 subprocess，
+      以 `TypeError: expected str ... not NoneType` 的 traceback 收场。
+    - 名字打错时原来照跑不误。这个项目里「拿着一个不存在的名字接着跑」已经坑过
+      人：Codex 对不存在的 profile 静默回落到默认 model，表现成「以为在测 A 其实
+      在测 B」。测试入口尤其不能这样——它的输出正是用来做判断的。
+    """
+    ups = reg.get("upstreams") or {}
+    if not ups:
+        die("registry.json 里还没有上游，先跑 `lc init`")
+    avail = ", ".join(sorted(ups))
+    names = [n for n in (argv or [reg.get("default")]) if n]
+    if not names:
+        die("没有默认上游，用 `lc use <name>` 选一个，或直接指定：lc %s <name>。"
+            "可用: %s" % (cmd, avail))
+    bad = [n for n in names if n not in ups]
+    if bad:
+        die("没有上游 '%s'。可用: %s" % ("', '".join(bad), avail))
+    return names
+
+
 def cmd_test(argv):
     reg = load_registry()
-    names = argv or [reg.get("default")]
     rc = 0
-    for n in names:
+    for n in _targets(reg, argv, "test"):
         rc |= _run_py("smoke.py", [n])
     sys.exit(rc)
 
 
 def cmd_e2e(argv):
     reg = load_registry()
-    names = argv or [reg.get("default")]
     rc = 0
-    for n in names:
+    for n in _targets(reg, argv, "e2e"):
         rc |= subprocess.call([str(ROOT / "scripts" / "test-codex.sh"), n])
     sys.exit(rc)
 
