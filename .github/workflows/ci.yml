@@ -28,7 +28,7 @@ jobs:
         run: python3 -m py_compile bin/lc scripts/smoke.py scripts/probe.py
 
       - name: Shell 语法检查
-        run: bash -n scripts/test-codex.sh docker/entrypoint.sh scripts/smoke.sh scripts/test-doctor-probe.sh scripts/test-export.sh
+        run: bash -n scripts/test-codex.sh docker/entrypoint.sh scripts/smoke.sh scripts/test-doctor-probe.sh scripts/test-export.sh scripts/test-lc-secrets.sh
 
       - name: CLI 可执行
         run: |
@@ -45,6 +45,12 @@ jobs:
         # 所以重点断言 .env / registry.json / 生成物 / 会话库一个都没进包，
         # 并真跑一遍 install.sh。
         run: bash scripts/test-export.sh
+
+      - name: 机密只进 .env 这个不变量
+        # issue #12 第一梯队的门禁：40 条断言覆盖 init / add / rm / migrate，
+        # 钉住「密钥、地址、header 值只出现在 .env，registry 只存变量名」。
+        # 不需要 docker / 网络 / API Key，约 1 秒。
+        run: bash scripts/test-lc-secrets.sh
 
       - name: 配置生成器输出校验
         run: |
