@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# ci-exempt: 端到端测试，需要活的 LiteLLM 网关和真实模型 API Key，
+# ci-exempt: CI 环境两者都没有。改动本脚本时请本地手工验证。
 # 端到端：让 Codex 真的在沙箱目录里改代码，验证 agent 循环闭合。
 # 用法: ./scripts/test-codex.sh <profile>   例: ./scripts/test-codex.sh qwen
 set -uo pipefail
