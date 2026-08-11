@@ -857,6 +857,16 @@ def _sha256(path):
     return h.hexdigest()
 
 
+def _sha256_text(text):
+    """包里现生成的那几个文件（MANIFEST.txt / install.sh）的 sha256。
+
+    它们不落盘，直接从字节算——和 add_bytes 用同一份 utf-8 编码，否则清单里
+    的值和包里的内容会对不上。
+    """
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def _image_digest(ref):
     """镜像的 RepoDigest（sha256:...）。拿不到返回 None。"""
     try:
@@ -949,7 +959,10 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-# 先核完整性：跨网搬运最常见的事故是 tar 传坏了或传了半个
+# 先核完整性：跨网搬运最常见的事故是 tar 传坏了或传了半个。
+# SHA256SUMS 覆盖包内每一个文件，不只是镜像 tar——bin/lc 和 scripts/ 是这台
+# 机器上马上要执行的东西，它们比镜像更需要核。解包到一半被打断（磁盘满、
+# 介质拔出）会留下一个看起来正常、实际缺文件的目录，这一步就是抓它的。
 if command -v sha256sum >/dev/null 2>&1; then
   CHECK="sha256sum -c"
 elif command -v shasum >/dev/null 2>&1; then
@@ -958,8 +971,17 @@ else
   CHECK=""
 fi
 if [ -n "$CHECK" ] && [ -f SHA256SUMS ]; then
-  echo "-- 校验 sha256"
-  $CHECK SHA256SUMS
+  echo "-- 校验 sha256（包内全部文件）"
+  # 不直接把 $CHECK 的输出打出来：现在是几十行 OK，真出问题的那一两行会被刷掉。
+  # 失败时再把非 OK 的行原样打出来，说清是哪个文件。
+  if sums_out="$($CHECK SHA256SUMS 2>&1)"; then
+    echo "   ✅ $(grep -c '' SHA256SUMS) 个文件校验通过"
+  else
+    printf '%s\\n' "$sums_out" | grep -v ': OK$' >&2 || true
+    echo "❌ sha256 校验失败：包在传输或解包过程中损坏了，不要继续安装" >&2
+    echo "   重新完整传一遍整包，或找打包方核对 SHA256SUMS" >&2
+    exit 1
+  fi
 else
   echo "⚠️  跳过 sha256 校验（没有 sha256sum/shasum 或缺 SHA256SUMS）"
 fi
@@ -1129,13 +1151,39 @@ def cmd_export(argv):
             "digest 是镜像的唯一标识；tag 不是。当前引用为 %s。" % litellm_ref,
             "即使 tag 与 digest 同时存在，内网侧仍应以 digest 为准。",
             "",
+            "完整性:",
+            "  SHA256SUMS 覆盖包内每一个文件，共 %d 项：源码 %d 个、镜像 tar %d 个，"
+            % (len(files) + len(entries) + 2, len(files), len(entries)),
+            "  以及本文件与 install.sh 自身。解包后 ./install.sh 第一步就会核一遍。",
+            "  它挡的是传输损坏与不完整解包，不是篡改——有权改包的人可以连",
+            "  SHA256SUMS 一起改。防篡改要看 release 那条链路上的构建证明。",
+            "",
             "内网侧: 解包后跑 ./install.sh，然后 ./bin/lc init",
             "",
             "本包不含 .env。地址与密钥永远不跨网搬运，由内网侧现填。",
         ]
         manifest = "\n".join(lines) + "\n"
+        install_sh = INSTALL_SH.replace(
+            "__INIT_HINT__",
+            "registry.json 已在包里，只需填地址与你的 API Key"
+            if bundled_registry else
+            "本包不含 registry.json，需完整配置（模型 ID / 上下文窗口 / 后端类型）")
 
-        sums = "".join("%s  %s\n" % (e["sha256"], e["file"]) for e in entries)
+        # SHA256SUMS 覆盖包内除它自己以外的每一个文件（issue #26）。以前只有镜像
+        # tar 那两行：于是「要 docker load 的镜像」被校验，而「内网侧要直接执行的
+        # bin/lc、docker/entrypoint.sh、scripts/*.py」一个都没有——覆盖面的分配
+        # 是反的。`--no-images` 的包更是连 SHA256SUMS 都不生成。
+        #
+        # 清单从打包用的同一份 files / entries 列表生成，不另写一份路径列表：
+        # 手写的那份迟早会和包的内容脱节，而脱节的形态是「清单说全过了、其实
+        # 漏了那个新加的文件」，比没有清单更糟。
+        #
+        # 这挡的是传输损坏与不完整解包（解包到一半被打断会留下一个看起来正常、
+        # 实际缺文件的目录），不是篡改：有权改包的人可以连 SHA256SUMS 一起改。
+        sums = "".join("%s  %s\n" % (_sha256(ROOT / f), f) for f in files)
+        sums += "".join("%s  %s\n" % (e["sha256"], e["file"]) for e in entries)
+        sums += "".join("%s  %s\n" % (_sha256_text(text), name) for name, text in
+                        (("MANIFEST.txt", manifest), ("install.sh", install_sh)))
 
         def add_bytes(tf, name, text, mode=0o644):
             data = text.encode("utf-8")
@@ -1152,33 +1200,40 @@ def cmd_export(argv):
             for _ref, fname in images:
                 tf.add(str(tmpdir / fname), arcname=bundle_name + "/images/" + fname)
             add_bytes(tf, "MANIFEST.txt", manifest)
-            if sums:
-                add_bytes(tf, "SHA256SUMS", sums)
-            add_bytes(tf, "install.sh", INSTALL_SH.replace(
-                "__INIT_HINT__",
-                "registry.json 已在包里，只需填地址与你的 API Key"
-                if bundled_registry else
-                "本包不含 registry.json，需完整配置（模型 ID / 上下文窗口 / 后端类型）"),
-                mode=0o755)
+            add_bytes(tf, "SHA256SUMS", sums)
+            add_bytes(tf, "install.sh", install_sh, mode=0o755)
     finally:
         shutil.rmtree(str(tmpdir), ignore_errors=True)
 
     # 纵深防御：包已经打完了，再独立核一遍敏感路径确实不在里面。
     # 只靠 .gitignore 正确是不够的——这个包要离开本机、跨网传递。
     with tarfile.open(str(out), "r:gz") as tf:
-        names = tf.getnames()
-    leaked = []
-    for n in names:
+        packed = [m.name for m in tf.getmembers() if m.isfile()]
+    leaked, rels = [], []
+    for n in packed:
         rel = n.split("/", 1)[1] if "/" in n else n
+        rels.append(rel)
         if rel in never or rel.startswith(BUNDLE_NEVER_DIRS):
             leaked.append(n)
     if leaked:
         out.unlink()
         die("包里出现了不该带走的文件，已删除产物：%s" % ", ".join(leaked))
 
+    # 同一趟复核里再核一件事：SHA256SUMS 必须覆盖包内除它自己以外的每一个文件。
+    # 这条是给以后往包里加东西的人兜底。漏了校验值的表现形态是内网侧 install.sh
+    # 说「全部校验通过」而那个新文件根本没被核——假的安全感比没有清单更糟，
+    # 而且要到出事时才发现。宁可在打包机上打不出包。
+    unlisted = sorted(set(rels) - set(l.split("  ", 1)[1] for l in sums.splitlines()
+                                      if l) - set(["SHA256SUMS"]))
+    if unlisted:
+        out.unlink()
+        die("SHA256SUMS 没有覆盖包内这些文件，已删除产物：%s" % ", ".join(unlisted))
+
     ok("离线包已生成: %s (%.1f MB)" % (out, out.stat().st_size / 1048576.0))
     say("  %s内容: 源码 %d 个文件 + %d 个镜像 + MANIFEST.txt + install.sh%s"
         % (C["d"], len(files), len(entries), C["x"]))
+    say("  %sSHA256SUMS 覆盖包内全部 %d 个文件（内网侧 install.sh 会核一遍）%s"
+        % (C["d"], len(rels) - 1, C["x"]))
     if bundled_registry:
         say("  %s含 registry.json（结构定义，无凭证）：内网侧 lc init 只问地址与密钥%s"
             % (C["d"], C["x"]))

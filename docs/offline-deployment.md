@@ -55,7 +55,7 @@ Expected contents include:
 - `install.sh`;
 - `MANIFEST.txt`;
 - image archives when `--no-images` was not used;
-- `SHA256SUMS` for image archives.
+- `SHA256SUMS`, covering every file in the bundle: source, `registry.json`, image archives, `MANIFEST.txt`, and `install.sh`.
 
 The bundle must not contain `.env`, generated `codex/` or `litellm/` configuration, `.git`, or local Codex state. The included `registry.json` contains model structure and environment-variable names, not resolved endpoints or credentials. Export refuses to create a bundle if it finds legacy plaintext header values; run `./bin/lc migrate` first, or use `--no-registry` after confirming that the isolated site will configure its own registry.
 
@@ -74,7 +74,7 @@ cd airgap-coder-0.145.0-YYYYMMDD-HHMMSS
 ./bin/lc test
 ```
 
-`install.sh` verifies the image archive checksums before running `docker load`. When the bundle includes `registry.json`, `lc init` reuses its reviewed model structure and asks only for the isolated site's endpoint and credential. Without a bundled registry, `lc init` creates the first upstream definition. `lc doctor` then checks the local environment and the configured upstream; `lc test` verifies the gateway path.
+`install.sh` verifies every checksum in `SHA256SUMS` before running `docker load`, and stops if any file fails. This detects transfer corruption and interrupted extraction — an unpack that dies partway leaves a directory that looks complete but is not. It is not tamper protection: whoever can modify the bundle can modify `SHA256SUMS` with it. Release-artifact provenance, described at the end of this page, is the control for that. When the bundle includes `registry.json`, `lc init` reuses its reviewed model structure and asks only for the isolated site's endpoint and credential. Without a bundled registry, `lc init` creates the first upstream definition. `lc doctor` then checks the local environment and the configured upstream; `lc test` verifies the gateway path.
 
 ## 4. Run the Codex container
 
