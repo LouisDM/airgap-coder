@@ -36,6 +36,7 @@ ENVFILE = ROOT / ".env"
 LITELLM_CFG = ROOT / "litellm" / "config.yaml"
 CODEX_DIR = ROOT / "codex"
 GW_PORT_DEFAULT = 4000
+GW_WAIT_DEFAULT = 45          # `lc up` 等网关就绪的轮数，见 gw_wait_tries()
 
 
 def project_version():
@@ -336,8 +337,34 @@ def gw_alive(reg=None):
         return False
 
 
-def wait_gw(reg, tries=45):
+def gw_wait_tries():
+    """`lc up` 等网关就绪的轮数（每轮约 1 秒），可用 LC_GATEWAY_WAIT 覆盖。
+
+    45 秒对慢内网机器不够，对本机又太长，而这个值原来是写死的常量，唯一的调节
+    手段是改代码。开成环境变量而不是 `lc up --wait`：`lc` 的命令行参数一直很
+    克制，而这个旋钮真正的用处是「这台机器慢，我要调大」——那属于机器的属性，
+    适合放在环境里，不是每次敲命令都带一遍。
+
+    值不合法时不静默回落：这个项目里「静默回落」已经坑过人（Codex 对不存在的
+    profile 就是静默回落到默认 model），所以说一句再用默认值。
+    """
+    raw = os.environ.get("LC_GATEWAY_WAIT", "").strip()
+    if not raw:
+        return GW_WAIT_DEFAULT
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 0
+    if n <= 0:
+        warn("LC_GATEWAY_WAIT=%r 不是正整数，按默认 %d 秒等待"
+             % (raw, GW_WAIT_DEFAULT))
+        return GW_WAIT_DEFAULT
+    return n
+
+
+def wait_gw(reg, tries=None):
     import time
+    tries = GW_WAIT_DEFAULT if tries is None else tries
     for i in range(tries):
         if gw_alive(reg):
             return i + 1
@@ -551,11 +578,17 @@ def cmd_up(argv):
     reg = load_registry()
     sync(reg, quiet=True)
     compose("up", "-d", "--force-recreate")
-    n = wait_gw(reg)
+    tries = gw_wait_tries()
+    n = wait_gw(reg, tries)
     if n:
         ok("网关就绪 (%ds) %s" % (n, gw_url(reg)))
     else:
-        err("网关未在 45s 内就绪，看日志: lc logs")
+        # 超时数从 tries 里来，不写死：调过 LC_GATEWAY_WAIT 的人看到的必须是
+        # 实际等了多久，否则这句话会把人引到错误的方向。
+        err("网关未在 %ds 内就绪，看日志: lc logs" % tries)
+        if tries == GW_WAIT_DEFAULT:
+            say("  %s机器慢的话可以调大：LC_GATEWAY_WAIT=120 lc up%s"
+                % (C["d"], C["x"]))
 
 
 def cmd_down(argv):
@@ -1240,6 +1273,10 @@ def usage():
     for n, _, d in COMMANDS:
         say("  %s%-8s%s %s" % (C["B"], n, C["x"], d))
     say("\n配置全部通过命令完成，不需要手改 yaml/toml。")
+    # 环境变量在 help 里也要露一面，否则它就是个只有测试知道的暗门（issue #27）
+    say("\n环境变量:")
+    say("  %sLC_GATEWAY_WAIT%s  lc up 等网关就绪的秒数（默认 %d，慢机器调大）"
+        % (C["B"], C["x"], GW_WAIT_DEFAULT))
 
 
 def main():

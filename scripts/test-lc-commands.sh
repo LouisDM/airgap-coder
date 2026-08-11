@@ -232,6 +232,72 @@ refute "网关不可达时没有 traceback"       "$WORK/log-st2" "Traceback (mo
 refute "网关不可达时不冒充存活"           "$WORK/log-st2" "网关存活"
 
 # ─────────────────────────────────────────────────────────────────────────
+echo "[3c] lc up 的失败分支：网关起不来（issue #27）"
+# 这条分支是用户最常撞上的那条（配置写错、端口被占、镜像没 load），而它原来
+# 恰恰是唯一没有断言的：走到它得真等 45 秒，那不是在测什么，只是在等。
+# LC_GATEWAY_WAIT 把等待轮数开成可注入之后，1 秒就能走到。
+#
+# 网关桩已经在 [3b] 里被杀掉了，所以这个端口现在没人监听：连接立刻被拒，
+# 一轮就结束，不会真等 1 秒以上。
+# up 的退出码本来就是 0（它只报告状态、不 sys.exit），所以只看输出。
+T0="$(date +%s)"
+NO_COLOR=1 LC_GATEWAY_WAIT=1 PATH="$WORK/bin:$PATH" "${LC[@]}" up \
+  < /dev/null > "$WORK/log-up-fail" 2>&1 || true
+ELAPSED=$(( $(date +%s) - T0 ))
+cat "$WORK/log-up-fail"
+# 提示语和实际等待是两件事：wait_gw 可能照样等满 45 秒，而 cmd_up 仍然按注入的
+# 值报「未在 1s 内就绪」。所以除了措辞，还要断言真的没等那么久。
+# 阈值给得宽松（15s）：这条测的是「注入生效了」，不是精确计时。
+[ "$ELAPSED" -lt 15 ] \
+  && pass "注入的超时真的生效了（失败分支 ${ELAPSED}s 内返回，不是 45s）" \
+  || fail "LC_GATEWAY_WAIT 只改了提示语，wait_gw 仍然等了 ${ELAPSED}s"
+# 带上 ❌ 一起断言：只查措辞的话，把 err 改成 ok 不会有任何东西变红——
+# 那会让一次失败的启动读起来像成功。
+assert "网关起不来时说清了超时，且是以失败的形式" \
+  "$WORK/log-up-fail" "❌ 网关未在 1s 内就绪"
+assert "并指向 lc logs"            "$WORK/log-up-fail" "lc logs"
+refute "失败时不冒充就绪"          "$WORK/log-up-fail" "网关就绪"
+refute "失败时没有 traceback"      "$WORK/log-up-fail" "Traceback (most recent call last)"
+# 超时秒数要来自实际用的值。写死 45 的话，调过 LC_GATEWAY_WAIT 的人会读到一句
+# 和现实不符的话——排查时最耽误人的就是这种话。
+refute "报的秒数不是写死的 45"     "$WORK/log-up-fail" "网关未在 45s 内就绪"
+# 调过的人不需要再被建议调大；这条提示只在用默认值时才有意义
+refute "显式设过超时的人不再被建议调大" "$WORK/log-up-fail" "可以调大"
+
+echo "[3d] LC_GATEWAY_WAIT 的取值处理"
+# 默认值和非法值的处理不能用 lc up 测——那要真等 45 秒。直接把 bin/lc 当模块
+# 载进来问它（模块级没有副作用，main() 有 __name__ 守卫）。
+# 默认值本身也要断言：不小心把默认改成 1，慢内网上的 lc up 会无故报失败，
+# 而没有任何东西会因此变红。
+# 非法值不许静默回落：Codex 对不存在的 profile 静默回落已经坑过人，同样的形态
+# 不该在这里重演。
+probe_wait() {  # probe_wait <LC_GATEWAY_WAIT 的值>
+  LC_GATEWAY_WAIT="$1" NO_COLOR=1 python3 - "$SRC/bin/lc" <<'PY'
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("lc", sys.argv[1])
+spec = importlib.util.spec_from_file_location("lc", sys.argv[1], loader=loader)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print("tries=%d default=%d" % (mod.gw_wait_tries(), mod.GW_WAIT_DEFAULT))
+PY
+}
+probe_wait ""    > "$WORK/log-w0" 2>&1
+probe_wait "120" > "$WORK/log-w1" 2>&1
+probe_wait "abc" > "$WORK/log-w2" 2>&1
+probe_wait "0"   > "$WORK/log-w3" 2>&1
+cat "$WORK/log-w0" "$WORK/log-w1" "$WORK/log-w2" "$WORK/log-w3"
+assert "不设时用默认 45"           "$WORK/log-w0" "tries=45 default=45"
+assert "设成 120 时真的是 120"     "$WORK/log-w1" "tries=120"
+assert "非法值说明了按默认处理"    "$WORK/log-w2" "不是正整数"
+assert "非法值回落到默认 45"       "$WORK/log-w2" "tries=45"
+assert "0 也当非法值处理"          "$WORK/log-w3" "tries=45"
+
+echo "[3e] lc help 里提到了这个变量"
+# 只有测试知道的环境变量等于一个暗门：用户撞上 45 秒超时时不会知道有得调。
+run "$WORK/log-help" help
+assert "help 列出了 LC_GATEWAY_WAIT" "$WORK/log-help" "LC_GATEWAY_WAIT"
+
+# ─────────────────────────────────────────────────────────────────────────
 if [ "$fails" -gt 0 ]; then
   echo "=== 失败 $fails 项 ==="
   exit 1

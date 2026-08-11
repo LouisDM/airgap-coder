@@ -21,6 +21,14 @@ Check container state and logs:
 
 Run `./bin/lc sync` to regenerate configuration from `registry.json` and `.env`, then restart with `./bin/lc down && ./bin/lc up`. If `.env` is incomplete, run `./bin/lc init` again.
 
+`lc up` waits 45 seconds for the gateway to answer its health endpoint. On a slow machine that can expire before a healthy gateway finishes starting, which looks like a failure but is not one. Raise the limit with `LC_GATEWAY_WAIT`, in seconds:
+
+```bash
+LC_GATEWAY_WAIT=120 ./bin/lc up
+```
+
+The gateway keeps starting either way — the timeout only bounds how long `lc up` watches it. `./bin/lc status` re-checks at any time.
+
 ## Upstream returns 404 or `Unsupported model`
 
 Confirm that the configured base URL ends at `/v1` and that the model ID matches the upstream exactly. Regenerate the gateway configuration with `./bin/lc sync`.
