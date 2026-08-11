@@ -47,8 +47,12 @@ jobs:
               continue
             fi
             # 只认「作为命令被执行」的引用，写在注释里不算
-            grep -qE "run:[^#]*\b(bash|sh|python3?)[[:space:]]+scripts/$base\b" .github/workflows/ci.yml \
-              || { echo "::error::$f 没有被 ci.yml 执行——它现在只是躺在仓库里"; miss=1; }
+            # 两个门禁都要覆盖。发版流水线手写了一份测试清单，漏掉一个的表现是
+            # 「CI 全绿、发版却少跑两套测试」——比 CI 漏跑更隐蔽，因为发版不常做。
+            for wf in ci release; do
+              grep -qE "\b(bash|sh|python3?)[[:space:]]+scripts/$base\b" ".github/workflows/$wf.yml" \
+                || { echo "::error::$f 没有被 $wf.yml 执行"; miss=1; }
+            done
           done
           [ "$miss" -eq 0 ] && echo "✅ 所有 scripts/test-*.sh 都接进了 CI"
           exit $miss
