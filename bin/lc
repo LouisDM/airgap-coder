@@ -36,7 +36,8 @@ ENVFILE = ROOT / ".env"
 LITELLM_CFG = ROOT / "litellm" / "config.yaml"
 CODEX_DIR = ROOT / "codex"
 GW_PORT_DEFAULT = 4000
-GW_WAIT_DEFAULT = 45          # `lc up` 等网关就绪的轮数，见 gw_wait_tries()
+GW_WAIT_DEFAULT = 45          # `lc up` 等网关就绪的秒数上限，见 gw_wait_seconds()
+GW_PROBE_TIMEOUT = 5          # 单次探活的 HTTP 超时（秒），并受剩余等待预算约束
 
 
 def project_version():
@@ -328,17 +329,19 @@ def gw_url(reg=None):
     return "http://127.0.0.1:%d" % reg.get("gateway_port", GW_PORT_DEFAULT)
 
 
-def gw_alive(reg=None):
+def gw_alive(reg=None, timeout=None):
     import urllib.request
+    timeout = GW_PROBE_TIMEOUT if timeout is None else timeout
     try:
-        urllib.request.urlopen(gw_url(reg) + "/health/liveliness", timeout=5).read()
+        urllib.request.urlopen(gw_url(reg) + "/health/liveliness",
+                               timeout=timeout).read()
         return True
     except Exception:
         return False
 
 
-def gw_wait_tries():
-    """`lc up` 等网关就绪的轮数（每轮约 1 秒），可用 LC_GATEWAY_WAIT 覆盖。
+def gw_wait_seconds():
+    """`lc up` 等网关就绪的秒数上限，可用 LC_GATEWAY_WAIT 覆盖。
 
     45 秒对慢内网机器不够，对本机又太长，而这个值原来是写死的常量，唯一的调节
     手段是改代码。开成环境变量而不是 `lc up --wait`：`lc` 的命令行参数一直很
@@ -362,14 +365,33 @@ def gw_wait_tries():
     return n
 
 
-def wait_gw(reg, tries=None):
+def wait_gw(reg, seconds=None):
+    """等网关就绪，返回实际等了多少秒；超预算返回 None。
+
+    按墙上时钟计预算，不按轮数。原来是 `for i in range(tries): probe; sleep(1)`，
+    等于假设「一轮≈一秒」——而一轮的耗时取决于探活怎么失败的：连接被拒是毫秒级，
+    防火墙 DROP 则要等满探活超时。内网对未放行端口通常是 DROP 而不是 REJECT，
+    正好落进最坏情况：45「轮」实测约 271 秒，而提示语说的是「未在 45s 内就绪」。
+
+    所以探活超时也必须收进剩余预算（`min(GW_PROBE_TIMEOUT, 剩余)`），否则最后
+    一次探活还是能冲出预算好几秒。代价是极小的 LC_GATEWAY_WAIT（比如 1）会让
+    单次探活也只有 1 秒——对一个响应很慢但活着的网关可能切早了。这是把「等待
+    上限」当真之后必然的结果：预算就是预算。
+    """
     import time
-    tries = GW_WAIT_DEFAULT if tries is None else tries
-    for i in range(tries):
-        if gw_alive(reg):
-            return i + 1
-        time.sleep(1)
-    return None
+    budget = GW_WAIT_DEFAULT if seconds is None else seconds
+    start = time.monotonic()
+    deadline = start + budget
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return None
+        if gw_alive(reg, timeout=min(GW_PROBE_TIMEOUT, left)):
+            # 回执里报的就是这个数，所以它必须是真的经过时间；不足一秒也报 1，
+            # 「网关就绪 (0s)」读起来像没等过。
+            return max(1, int(round(time.monotonic() - start)))
+        # 剩余预算不到一秒时别睡满一秒，否则同样会冲出预算
+        time.sleep(max(0.0, min(1.0, deadline - time.monotonic())))
 
 
 # ---------------------------------------------------------------- commands
@@ -578,17 +600,17 @@ def cmd_up(argv):
     reg = load_registry()
     sync(reg, quiet=True)
     compose("up", "-d", "--force-recreate")
-    tries = gw_wait_tries()
-    n = wait_gw(reg, tries)
+    budget = gw_wait_seconds()
+    n = wait_gw(reg, budget)
     if n:
         ok("网关就绪 (%ds) %s" % (n, gw_url(reg)))
-    else:
-        # 超时数从 tries 里来，不写死：调过 LC_GATEWAY_WAIT 的人看到的必须是
-        # 实际等了多久，否则这句话会把人引到错误的方向。
-        err("网关未在 %ds 内就绪，看日志: lc logs" % tries)
-        if tries == GW_WAIT_DEFAULT:
-            say("  %s机器慢的话可以调大：LC_GATEWAY_WAIT=120 lc up%s"
-                % (C["d"], C["x"]))
+        return
+    # 超时数从 budget 里来，不写死：调过 LC_GATEWAY_WAIT 的人看到的必须是
+    # 实际等了多久，否则这句话会把人引到错误的方向。
+    err("网关未在 %ds 内就绪，看日志: lc logs" % budget)
+    if budget == GW_WAIT_DEFAULT:
+        say("  %s机器慢的话可以调大：LC_GATEWAY_WAIT=120 lc up%s"
+            % (C["d"], C["x"]))
 
 
 def cmd_down(argv):
