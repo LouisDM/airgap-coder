@@ -3,6 +3,8 @@
 #   - use / ls / up / down / status（issue #12 第二梯队）
 #   - test / e2e / logs / code（issue #12 第三梯队）
 #   - `lc up` 的两条失败路径（issue #34 compose 退出码 / issue #35 等待预算）
+#   - 网关端口的唯一真源（issue #40：registry.json 的 gateway_port 必须一路生效到
+#     compose 的端口映射、codex 的 base_url 和 `lc test`，而不是各读各的）
 #
 # 第三梯队按 issue 里的分级刻意写得轻：test / e2e 本身就是测试入口，这里不去测
 # 「测试跑得对不对」，只测它们**解析不了目标时干净失败**；logs 只测参数拼装；
@@ -87,6 +89,9 @@ PY
 
 cat > "$ENVF" <<EOF
 LITELLM_MASTER_KEY=sk-$CANARY_MK
+# 老版本 .env.example 里带着这一行。留着它，用来钉住「端口的源已经不是 .env 了」
+# （issue #40）：registry 里的端口是现取的 $PORT，注入给 compose 的必须是那个。
+GATEWAY_PORT=4000
 KEY_ALPHA=$CANARY_KEY
 KEY_ALPHA_BASE=http://alpha.your-intranet.local:8000/v1
 KEY_ALPHA_HEADER_USER_AGENT=$CANARY_HDR
@@ -197,6 +202,10 @@ PY
 cat > "$WORK/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$DOCKER_LOG"
+# 端口映射走的是 compose 的 ${GATEWAY_PORT} 插值，不在 argv 里，所以单看参数
+# 拼装看不出端口对不对（issue #40 就是这么漏过去的）。把注入的环境变量也记下来。
+# 用 ${VAR-} 而不是 ${VAR:-}：要能区分「没注入」和「注入了空值」。
+printf 'env GATEWAY_PORT=%s\n' "${GATEWAY_PORT-<unset>}" >> "$DOCKER_LOG"
 if [ "${DOCKER_RC:-0}" != "0" ]; then
   echo "Error response from daemon: driver failed programming external" >&2
   echo "connectivity: Bind for 0.0.0.0:4000 failed: port is already allocated" >&2
@@ -274,8 +283,24 @@ mv "$WORK/reg.saved" "$REG"
 echo "[3] lc up / down / status：docker 参数拼装与网关探活"
 start_gw gw_http.py
 
+: > "$DOCKER_LOG"
 run "$WORK/log-up" up
 assert "up 拼出了 compose up -d --force-recreate" "$DOCKER_LOG" "compose up -d --force-recreate"
+# ── 端口的唯一真源（issue #40）─────────────────────────────────────────────
+# registry 里的 gateway_port 必须一路生效到 compose 的端口映射上。原来没有任何
+# 代码写 GATEWAY_PORT，容器发布在 4000、而 status / code / doctor 去连 registry
+# 里那个端口——「status 说死了、test 说活着」。$PORT 是现取的空闲端口，必然不是
+# 4000，所以这几条断言不会在「碰巧都是 4000」的情况下假通过。
+assert "up 把 registry 的端口注入给了 compose"   "$DOCKER_LOG" "env GATEWAY_PORT=$PORT"
+refute "注入的不是写死的 4000"                   "$DOCKER_LOG" "env GATEWAY_PORT=4000"
+refute "GATEWAY_PORT 确实注入了（不是没设）"      "$DOCKER_LOG" "env GATEWAY_PORT=<unset>"
+assert "codex 配置的 base_url 也用同一个端口"    "$CFG_TOML" "base_url = \"http://127.0.0.1:$PORT/v1\""
+# 沙箱的 .env 里特意留了一行老版本的 GATEWAY_PORT=4000（.env.example 曾经带着它）。
+# 上面那条断言在这个前提下才有意义：它钉的是「.env 不再是端口的源」，而不只是
+# 「两处碰巧一致」。改成「sync 把端口同步进 .env」的实现会让这条继续绿，但那种
+# 实现下手改 .env 仍然会漂移——所以还要看 test-lc-secrets.sh 里那条「lc 从不往
+# .env 写 GATEWAY_PORT」。
+assert "沙箱 .env 里确实留着老版本那行"          "$ENVF" "GATEWAY_PORT=4000"
 assert "up 在网关起来后给出就绪回执"              "$WORK/log-up" "网关就绪"
 # 回执里那个数是 wait_gw 的返回值。网关立刻就应答的话它必须是 1s——报成预算
 # 上限或者 0s 都说明返回的不是「真的等了多久」（issue #35）。
@@ -437,6 +462,23 @@ assert "黑洞网关最终被判为未就绪" "$WORK/log-up-bh" "❌ 网关未�
   || fail "单次探活冲出了预算：说 2s，实际 ${ELAPSED}s"
 stop_gw
 
+echo "[3i] registry 里的 gateway_port 写坏了：说人话，不静默回落到 4000（issue #40）"
+# 端口现在是唯一真源，读不出来时回落到 4000 等于把 issue #40 那个形态原样重演一遍
+# （网关在一个端口上，诊断命令看另一个），而且这次连 registry 都不指向真相。
+cp "$REG" "$WORK/reg.saved-port"
+python3 - "$REG" <<'PY'
+import json, sys
+reg = json.load(open(sys.argv[1], encoding="utf-8"))
+reg["gateway_port"] = "四千"
+json.dump(reg, open(sys.argv[1], "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+run_any "$WORK/log-badport" status
+cat "$WORK/log-badport"
+assert "坏端口时点名了是哪个字段"   "$WORK/log-badport" "gateway_port"
+refute "坏端口时没有 traceback"     "$WORK/log-badport" "Traceback (most recent call last)"
+refute "坏端口时不静默按 4000 继续" "$WORK/log-badport" "http://127.0.0.1:4000"
+cp "$WORK/reg.saved-port" "$REG"
+
 # ─────────────────────────────────────────────────────────────────────────
 echo "[4] lc test / lc e2e：解析不了目标时干净失败（issue #12 第三梯队）"
 # 这两个是测试入口，它们的输出正是用来做判断的，所以「拿着一个不存在的名字接着
@@ -506,6 +548,17 @@ cat "$WORK/log-e2e-noprof"
 refute "空 CODEX_HOME 时也没有 basename 噪音" "$WORK/log-e2e-noprof" "basename:"
 assert "说清了一个 profile 都没有"      "$WORK/log-e2e-noprof" "一个 profile 都没有"
 assert "并指向 lc sync"                 "$WORK/log-e2e-noprof" "lc sync"
+
+echo "[4e] lc test 打的是 registry 里那个端口，不是写死的 4000（issue #40）"
+# smoke.py 是 `lc test` 的全部内容，而它原来写死 GW = http://127.0.0.1:4000。
+# 端口改成非 4000 之后，`lc status` 探 registry 那个端口说「无响应」、`lc test`
+# 探 4000 说「连上了」——同一台机器上两个诊断命令互相矛盾，两个都「没坏」。
+# 网关桩此刻是停的，所以第 1 步必然失败；要断言的是它**冲哪个地址**去失败的。
+if run_fail "$WORK/log-test-port" test alpha; then
+  assert "smoke 探的是 registry 里的端口" "$WORK/log-test-port" "http://127.0.0.1:$PORT"
+  refute "smoke 没去探写死的 4000"        "$WORK/log-test-port" "127.0.0.1:4000"
+  assert "网关不通时给的是判定而不是栈"    "$WORK/log-test-port" "gateway 未响应"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────
 echo "[5] lc logs：参数拼装（薄封装，不真起容器）"

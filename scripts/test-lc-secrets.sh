@@ -154,9 +154,11 @@ json.dump(reg, open(sys.argv[2], "w", encoding="utf-8"), indent=2, ensure_ascii=
 PY
 cp "$REG" "$WORK/reg-before.json"
 
-# 答案顺序：网关端口（空=沿用）/ Base URL / API Key / header 值 / 再加一个吗
+# 答案顺序：网关端口 / Base URL / API Key / header 值 / 再加一个吗
+# 端口特意答一个非 4000 的值：init 唯一会问的这个配置项必须真的生效，而且只
+# 生效在一个地方（issue #40）。答 4000 的话下面两条断言都会假通过。
 cat > "$WORK/a3" <<EOF
-
+4137
 http://$HOSTNAME_CANARY:8000/v1
 $CANARY_KEY
 $CANARY_HDR
@@ -182,6 +184,11 @@ else
   fail "init 改动了已有上游的结构参数（模型 ID / 上下文窗口 / params 应当沿用）"
 fi
 
+# 网关端口：registry 是唯一真源，.env 里一行都不许有（issue #40）。
+# 「让 sync 把端口同步进 .env」的实现也能让端口生效，但那是两个源保持同步，
+# 手改 .env 之后照样漂移；这条钉的是「源被减掉了」，那种实现会让它变红。
+assert "init 问来的端口写进了 registry"        "$REG" '"gateway_port": 4137'
+refute ".env 里没有 GATEWAY_PORT（端口不走 .env）" "$ENVF" "GATEWAY_PORT"
 assert ".env 补上了 Base URL"   "$ENVF" "KEY_INTRANET_BASE=http://$HOSTNAME_CANARY:8000/v1"
 assert ".env 补上了 API Key"    "$ENVF" "KEY_INTRANET=$CANARY_KEY"
 assert ".env 补上了 header 值"  "$ENVF" "KEY_INTRANET_HEADER_USER_AGENT=$CANARY_HDR"

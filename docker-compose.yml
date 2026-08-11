@@ -4,6 +4,8 @@ services:
     container_name: local-cli-gateway
     restart: unless-stopped
     ports:
+      # GATEWAY_PORT 由 `lc` 起 compose 时从 registry.json 的 gateway_port 注入
+      # （bin/lc 的 compose()）。默认值留给不经过 lc 直接 docker compose up 的人。
       - "${GATEWAY_PORT:-4000}:4000"
     volumes:
       - ./litellm/config.yaml:/app/config.yaml:ro
