@@ -26,6 +26,29 @@ jobs:
         with:
           python-version: "3.9"   # 与 macOS 自带版本对齐，避免用到更新的语法
 
+      - name: 每个测试脚本都必须被 CI 调用
+        # 踩过三次的坑：测试脚本进了仓库，但忘了在下面加一行调用它，于是 CI
+        # 照样全绿、脚本从不执行，制造「有门禁」的假象（test-doctor-probe.sh、
+        # test-lc-secrets.sh、test-lc-commands.sh 各中过一次）。
+        # 这条元断言从根上堵住这个模式：新增测试脚本却没接进来，CI 直接红。
+        run: |
+          set -euo pipefail
+          miss=0
+          for f in scripts/test-*.sh; do
+            base=$(basename "$f")
+            # 确实跑不了的脚本在自己头部写 `# ci-exempt: <理由>` 显式豁免，
+            # 理由跟着脚本走，不散落在 ci.yml 里
+            if grep -q '^# ci-exempt:' "$f"; then
+              echo "  ⏭  $base 已显式豁免：$(grep -m1 '^# ci-exempt:' "$f" | sed 's/^# ci-exempt: *//')"
+              continue
+            fi
+            # 只认「作为命令被执行」的引用，写在注释里不算
+            grep -qE "run:[^#]*\b(bash|sh)[[:space:]]+scripts/$base\b" .github/workflows/ci.yml \
+              || { echo "::error::$f 没有被 ci.yml 执行——它现在只是躺在仓库里"; miss=1; }
+          done
+          [ "$miss" -eq 0 ] && echo "✅ 所有 scripts/test-*.sh 都接进了 CI"
+          exit $miss
+
       - name: Python 语法检查
         run: python3 -m py_compile bin/lc scripts/*.py
 
@@ -68,6 +91,15 @@ jobs:
         # 重点是「网关不可达时给一句干净的话而不是 traceback」这类分支——
         # 它们只在出故障时才走到，正是最容易悄悄坏掉的地方。
         run: bash scripts/test-lc-commands.sh
+
+      - name: 版本号一致性
+        run: bash scripts/test-version.sh
+
+      - name: 容器 entrypoint 的参数路由与必需变量校验
+        run: bash scripts/test-entrypoint.sh
+
+      - name: 本地 codex review 脚本不碰已提交的凭证
+        run: bash scripts/test-codex-review-script.sh
 
       - name: 配置生成器输出校验
         run: |
