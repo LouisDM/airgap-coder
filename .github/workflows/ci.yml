@@ -63,6 +63,12 @@ jobs:
         # 不需要 docker / 网络 / API Key，约 1 秒。
         run: bash scripts/test-lc-secrets.sh
 
+      - name: use / ls / up / down / status 的行为门禁
+        # issue #12 第二梯队。这些命令此前只有 py_compile 兜底，行为零覆盖。
+        # 重点是「网关不可达时给一句干净的话而不是 traceback」这类分支——
+        # 它们只在出故障时才走到，正是最容易悄悄坏掉的地方。
+        run: bash scripts/test-lc-commands.sh
+
       - name: 配置生成器输出校验
         run: |
           set -euo pipefail
