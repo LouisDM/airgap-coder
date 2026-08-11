@@ -7,8 +7,21 @@ set -uo pipefail
 
 PROFILE="${1:-kimi}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-set -a; . "$ROOT/.env"; set +a
 export CODEX_HOME="$ROOT/codex"
+
+# 只注入 Codex 配置里声明的 env_key，不整份 source .env（issue #42）。
+# 这里起的 codex 是 approval_policy = "never"，模型输出的 shell 命令直接执行；
+# 整份 .env 进去等于把所有上游的凭证和内网地址交给它，而它一个都用不到。
+# 名字从生成的 config.toml 里读，和 bin/lc 的 codex_env_keys() 同源。
+if [ -f "$ROOT/.env" ]; then
+  for _name in $(cat "$CODEX_HOME"/config.toml "$CODEX_HOME"/*.config.toml 2>/dev/null \
+                 | sed -n 's/^[[:space:]]*env_key[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+                 | sort -u); do
+    _val="$(sed -n "s/^[[:space:]]*${_name}[[:space:]]*=[[:space:]]*//p" "$ROOT/.env" | head -1)"
+    [ -n "$_val" ] && export "${_name}=${_val}"
+  done
+  unset _name _val
+fi
 
 # Codex 对不存在的 profile 不报错，会静默回落到 config.toml 的默认 model，
 # 导致你以为在测 A 其实在测 B。这里显式挡掉。
