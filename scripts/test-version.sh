@@ -13,7 +13,25 @@ test "$(NO_COLOR=1 python3 "$ROOT/bin/lc" --version)" = "airgap-coder $expected"
 test "$(NO_COLOR=1 python3 "$ROOT/bin/lc" -V)" = "airgap-coder $expected"
 test "$(NO_COLOR=1 python3 "$ROOT/bin/lc" version)" = "airgap-coder $expected"
 
-grep -q "ARG CODEX_VERSION=0.145.0" "$ROOT/docker/Dockerfile"
+# Codex 版本的唯一真源是 Dockerfile 的 ARG，从那里读出来，不在本脚本里写死。
+# 写死的话，升级 Codex 时要改的地方就多一处，而且改漏了表现为「测试红了但
+# 不知道该改哪」——把真源读出来，测试自己永远不需要跟着改。
+codex_ver="$(sed -n 's/^ARG CODEX_VERSION=\([0-9][0-9.]*\)$/\1/p' "$ROOT/docker/Dockerfile")"
+test -n "$codex_ver" || {
+  echo "::error::docker/Dockerfile 里读不到 ARG CODEX_VERSION"; exit 1
+}
+
+# README 教读者装的 Codex 版本必须和镜像里锁的是同一个。不一致的后果不是「文档
+# 过时」这么轻——贡献者照 README 装了另一个版本，本机跑得好好的、进容器就挂，
+# 而这正是 lc doctor 的版本校验（issue #2）要帮人排查的那类问题。文档不该主动
+# 制造它。
+bad_npm="$(grep -rho "@openai/codex@[0-9][0-9.]*" \
+  "$ROOT/README.md" "$ROOT/README.zh-CN.md" "$ROOT/docs" 2>/dev/null | sort -u \
+  | grep -v "^@openai/codex@$codex_ver\$" || true)"
+test -z "$bad_npm" || {
+  echo "::error::文档教装的 Codex 版本与 Dockerfile 锁的 $codex_ver 不一致: $bad_npm"
+  exit 1
+}
 
 # ── 镜像 tag 由 VERSION 推导（issue #36） ─────────────────────────────────
 # lc export 推导 tag 的那行代码单独成了 _dev_image_ref()，直接问它，不去解析源码。
@@ -33,7 +51,7 @@ test "$tag" = "airgap-coder:$expected" || {
 # 反向再查一次：tag 里不许出现 Codex 版本。上面那条在两个版本号偶然相等时
 # 会假通过，而「用错了哪个版本号」正是这个 issue 的全部内容。
 case "$tag" in
-  *0.145.0*) echo "::error::镜像 tag 用的是 Codex 版本，不是本项目版本"; exit 1 ;;
+  *"$codex_ver"*) echo "::error::镜像 tag 用的是 Codex 版本，不是本项目版本"; exit 1 ;;
 esac
 
 # Dockerfile 的 APP_VERSION 只喂给 OCI label，但它是第二个写着本项目版本号的
@@ -62,4 +80,4 @@ test -z "$bad" || {
   exit 1
 }
 
-echo "✅ version: $expected; Codex baseline: 0.145.0; dev image: $tag"
+echo "✅ version: $expected; Codex baseline: $codex_ver; dev image: $tag"
