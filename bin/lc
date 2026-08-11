@@ -408,10 +408,33 @@ def _fill_secrets(name, u, env):
         env[ref] = ask("  HTTP 头 %s 的值" % hk, env.get(ref) or None)
 
 
+def _drop_orphan_headers(old, headers, env):
+    """覆盖同名上游时，把新定义不再引用的 header 变量从 .env 里清掉。
+
+    header 变量名由「上游名 + 头名」派生，所以头名一改或那个头被去掉，旧变量
+    就没有任何配置引用它了，而 write_env 会原样把它写回去——一个不再被引用的
+    凭证值留在磁盘上，还会被 docker-compose 的 env_file 一直注入网关容器。
+    env_key / env_base 没有这个问题：变量名只由上游名派生，同名覆盖时正好被
+    新值盖掉。cmd_rm 早就是这么清的，缺的只是 add 的覆盖分支。
+
+    `ref not in keep` 不能省：头名没变时新旧引用是同一个变量名，而新值在这之前
+    就已经写进 env 了，无条件 pop 等于把用户刚输入的值删掉。
+    """
+    keep = set(headers.values())
+    gone = sorted(set(ref for ref in (old.get("headers") or {}).values()
+                      if is_env_ref(ref) and ref not in keep))
+    for ref in gone:
+        env.pop(ref, None)
+    if gone:
+        say("  %s已从 .env 移除不再被引用的 header 变量: %s%s"
+            % (C["d"], ", ".join(gone), C["x"]))
+
+
 def _add_one(reg, env):
     head("添加上游")
     name = ask("名称（英文，用作 profile 名，如 intranet-32b）")
-    if name in reg["upstreams"] and not ask_bool("'%s' 已存在，覆盖?" % name, False):
+    old = reg["upstreams"].get(name)
+    if old is not None and not ask_bool("'%s' 已存在，覆盖?" % name, False):
         return
     base = _ask_base("Base URL（到 /v1 为止，如 https://your-intranet.local:8000/v1）")
     model = ask("上游模型 ID（发给后端的 model 字段，如 qwen3-32b）")
@@ -447,6 +470,8 @@ def _add_one(reg, env):
     ek, eb = env_key_name(name), env_key_name(name) + "_BASE"
     env[ek] = key
     env[eb] = base
+    if old:
+        _drop_orphan_headers(old, headers, env)
     reg["upstreams"][name] = {
         "model": model, "env_key": ek, "env_base": eb,
         "context_window": ctx, "max_output_tokens": out,
