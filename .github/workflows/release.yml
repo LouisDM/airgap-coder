@@ -38,6 +38,8 @@ jobs:
           bash scripts/test-doctor-probe.sh
           bash scripts/test-export.sh
           bash scripts/test-lc-secrets.sh
+          bash scripts/test-lc-commands.sh
+          bash scripts/test-litellm-bridge.sh
 
       - name: Build reproducible source archives
         run: |
