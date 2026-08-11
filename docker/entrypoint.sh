@@ -2,6 +2,20 @@
 # 容器启动时按环境变量生成 Codex 配置，镜像本身不烤死任何站点信息。
 set -euo pipefail
 
+# 不碰模型的子命令先放行，再校验网关配置（issue #29）。
+# 搬完镜像的第一个动作往往是核对「这个 tar 里到底是哪个 Codex 版本」——比对
+# MANIFEST 里写的版本号，或者排查故障时确认容器内版本。那时候网关可能还没起、
+# 地址也可能在另一个团队手上。要求先配网关才能查版本，等于在最需要快速确认
+# 的时刻加了一道无关的门槛。Dockerfile 的 `CMD ["--help"]` 也走这条路：
+# 不带参数的 `docker run airgap-coder:<ver>` 本该打印用法，而不是要求配网关。
+#
+# 不放行「无参数」：那是交互式 TUI，它真的要连网关，也要下面生成的 config.toml。
+case "${1:-}" in
+  --version|-V|--help|-h)
+    exec codex "$@"
+    ;;
+esac
+
 : "${GATEWAY_URL:?必须设置 GATEWAY_URL，例: http://gateway.your-intranet:4000/v1}"
 : "${GATEWAY_KEY:?必须设置 GATEWAY_KEY（LiteLLM 的 master key）}"
 : "${MODEL:?必须设置 MODEL（网关里注册的 model_name）}"
