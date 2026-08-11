@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
-# 钉住 lc use / ls / up / down / status 的行为（issue #12 第二梯队），以及
-# `lc up` 的两条失败路径（issue #34 compose 退出码 / issue #35 等待预算）。
+# 钉住这些命令的行为：
+#   - use / ls / up / down / status（issue #12 第二梯队）
+#   - test / e2e / logs / code（issue #12 第三梯队）
+#   - `lc up` 的两条失败路径（issue #34 compose 退出码 / issue #35 等待预算）
+#
+# 第三梯队按 issue 里的分级刻意写得轻：test / e2e 本身就是测试入口，这里不去测
+# 「测试跑得对不对」，只测它们**解析不了目标时干净失败**；logs 只测参数拼装；
+# code 重点是 CODEX_HOME 不许指向用户的 ~/.codex。
 #
 # 这五个命令写坏了不会泄密，但会浪费大量排查时间，而且其中两条正好踩在项目
 # 已知的坑上：
@@ -429,6 +435,123 @@ assert "黑洞网关最终被判为未就绪" "$WORK/log-up-bh" "❌ 网关未�
 [ "$ELAPSED" -lt 4 ] \
   && pass "单次探活超时收进了剩余预算（${ELAPSED}s ≤ 预算 + 余量）" \
   || fail "单次探活冲出了预算：说 2s，实际 ${ELAPSED}s"
+stop_gw
+
+# ─────────────────────────────────────────────────────────────────────────
+echo "[4] lc test / lc e2e：解析不了目标时干净失败（issue #12 第三梯队）"
+# 这两个是测试入口，它们的输出正是用来做判断的，所以「拿着一个不存在的名字接着
+# 跑」在这里代价最大——Codex 对不存在的 profile 静默回落到默认 model，表现成
+# 「以为在测 A 其实在测 B」。真跑测试需要活的网关和真模型，CI 没有，也不该测
+# 「测试跑得对不对」；这里只钉住三条解析失败路径。
+#
+# 真实的 smoke.py / test-codex.sh 复制进沙箱：不复制的话 lc 会去调一个不存在的
+# 脚本，报的是「文件找不到」，那条路径测不到任何产品行为。
+mkdir -p "$SRC/scripts"
+cp "$REPO/scripts/smoke.py" "$REPO/scripts/probe.py" "$REPO/scripts/test-codex.sh" \
+   "$SRC/scripts/"
+
+for c in test e2e; do
+  echo "  -- lc $c --"
+  if run_fail "$WORK/log-$c-bad" "$c" nosuch; then
+    assert "lc $c 挡下不存在的上游"     "$WORK/log-$c-bad" "没有上游 'nosuch'"
+    assert "并列出可用的上游"            "$WORK/log-$c-bad" "alpha, beta"
+  fi
+done
+
+echo "[4b] 没有默认上游时不许吐 traceback"
+# 原来 reg.get("default") 是 None 会一路传进 subprocess，以
+# `TypeError: expected str ... not NoneType` 收场——用户看到的是一段 Python 栈。
+mv "$REG" "$WORK/reg.saved"
+python3 - "$REG" "$WORK/reg.saved" <<'PY'
+import json, sys
+reg = json.load(open(sys.argv[2], encoding="utf-8"))
+reg["default"] = None
+json.dump(reg, open(sys.argv[1], "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+for c in test e2e; do
+  if run_fail "$WORK/log-$c-nodef" "$c"; then
+    assert "lc $c 说清了没有默认上游"   "$WORK/log-$c-nodef" "没有默认上游"
+    assert "并给出怎么选"                "$WORK/log-$c-nodef" "lc use <name>"
+    assert "也给出可用的上游"            "$WORK/log-$c-nodef" "alpha, beta"
+  fi
+  refute "lc $c 没有 TypeError"          "$WORK/log-$c-nodef" "TypeError"
+done
+
+echo "[4c] 空注册表时指向 lc init"
+echo '{"default": null, "gateway_port": 4000, "upstreams": {}}' > "$REG"
+for c in test e2e; do
+  if run_fail "$WORK/log-$c-empty" "$c"; then
+    assert "lc $c 在空注册表时指向 lc init" "$WORK/log-$c-empty" "lc init"
+  fi
+done
+mv "$WORK/reg.saved" "$REG"
+
+echo "[4d] lc e2e 的 profile 防呆：一个 profile 都没有时也要说人话"
+# test-codex.sh 里那个防呆是最后一道线（它也能被单独调用）。原来 `ls` 没匹配到
+# 任何文件时 xargs 会拿空输入去调 basename，真正的提示前先蹦一行
+# "basename: missing operand"，读的人会以为脚本自己坏了。
+# 有 profile 那条：沙箱里 alpha / beta 都 sync 过了
+bash "$SRC/scripts/test-codex.sh" nosuch > "$WORK/log-e2e-prof" 2>&1 || true
+cat "$WORK/log-e2e-prof"
+assert "挡下不存在的 profile"           "$WORK/log-e2e-prof" "profile 'nosuch' 不存在"
+assert "并列出可用的 profile"           "$WORK/log-e2e-prof" "alpha"
+refute "没有 basename 的报错噪音"       "$WORK/log-e2e-prof" "basename:"
+# 一个 profile 都没有那条：CODEX_HOME 由脚本自身路径推导（它会覆盖外面传的值），
+# 所以要把脚本放到一个没有 codex/ 兄弟目录的地方去跑。
+mkdir -p "$WORK/iso/scripts"
+cp "$REPO/scripts/test-codex.sh" "$WORK/iso/scripts/"
+cp "$ENVF" "$WORK/iso/.env"
+bash "$WORK/iso/scripts/test-codex.sh" nosuch > "$WORK/log-e2e-noprof" 2>&1 || true
+cat "$WORK/log-e2e-noprof"
+refute "空 CODEX_HOME 时也没有 basename 噪音" "$WORK/log-e2e-noprof" "basename:"
+assert "说清了一个 profile 都没有"      "$WORK/log-e2e-noprof" "一个 profile 都没有"
+assert "并指向 lc sync"                 "$WORK/log-e2e-noprof" "lc sync"
+
+# ─────────────────────────────────────────────────────────────────────────
+echo "[5] lc logs：参数拼装（薄封装，不真起容器）"
+: > "$DOCKER_LOG"
+run "$WORK/log-logs" logs
+assert "logs 拼出了 compose logs -f"    "$DOCKER_LOG" "compose logs -f"
+: > "$DOCKER_LOG"
+run "$WORK/log-logs2" logs --tail 5
+assert "透传了额外参数给 docker compose" "$DOCKER_LOG" "compose logs -f --tail 5"
+
+# ─────────────────────────────────────────────────────────────────────────
+echo "[6] lc code：网关没起来就别启动 Codex，CODEX_HOME 不许指向 ~/.codex"
+# 假 codex：把 CODEX_HOME 和 argv 记进文件，同时留一个「我被启动过」的痕迹。
+# 光看输出不够——要断言的是「没起来时压根没启动 Codex」。
+cat > "$WORK/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+{ echo "CODEX_HOME=$CODEX_HOME"; echo "argv=$*"; } >> "$CODEX_LOG"
+exit 0
+EOF
+chmod +x "$WORK/bin/codex"
+export CODEX_LOG="$WORK/codex.log"
+: > "$CODEX_LOG"
+
+echo "[6a] 网关不可达：不启动 Codex"
+# 网关桩在 [3h] 末尾已经停掉了，这个端口现在没人监听。
+if run_fail "$WORK/log-code-dead" code; then
+  assert "明确说网关没起来"   "$WORK/log-code-dead" "网关没起来"
+  assert "并指向 lc up"       "$WORK/log-code-dead" "lc up"
+fi
+if [ -s "$CODEX_LOG" ]; then
+  cat "$CODEX_LOG"
+  fail "网关不可达却还是把 Codex 启起来了"
+else
+  pass "网关不可达时压根没启动 Codex"
+fi
+
+echo "[6b] 网关活着：CODEX_HOME 指向仓库内的 codex/，profile 是当前默认上游"
+# CODEX_HOME 写错会污染用户全局的 ~/.codex（会话库、配置），而且是静默发生的。
+start_gw gw_http.py
+: > "$CODEX_LOG"
+run "$WORK/log-code" code --sandbox read-only
+cat "$CODEX_LOG"
+assert "CODEX_HOME 指向仓库内的 codex/" "$CODEX_LOG" "CODEX_HOME=$SRC/codex"
+refute "CODEX_HOME 不是用户的 ~/.codex" "$CODEX_LOG" "$HOME/.codex"
+assert "带上了当前默认上游的 profile"    "$CODEX_LOG" "--profile beta"
+assert "透传了额外参数给 codex"          "$CODEX_LOG" "--sandbox read-only"
 stop_gw
 
 # ─────────────────────────────────────────────────────────────────────────
