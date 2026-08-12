@@ -51,8 +51,17 @@ npm install -g @openai/codex@0.145.0
 ./bin/lc init    # 配置自托管上游
 ./bin/lc up      # 启动 LiteLLM 网关
 ./bin/lc test    # 验证协议和工具调用
-./bin/lc code    # 使用当前上游启动 Codex
 ```
+
+然后**到你自己的项目目录里**启动 Codex。工具目录和工作目录是两回事：
+
+```bash
+cd ~/your-project
+~/airgap-coder/bin/lc code    # 使用当前上游启动 Codex
+```
+
+> [!IMPORTANT]
+> `lc code` 在当前目录里启动 Codex，且配置是 `approval_policy = "never"`——模型不用批准就能读这个目录。在 airgap-coder 目录里启动，等于把 `.env`（全部上游的地址与凭证）放进它一句 `cat` 就能拿到的地方。`lc code` 检测到这种情况会警告，但**不会阻断**，因为用 Codex 审查 airgap-coder 自己是被支持的用法。详见[工作区中的凭证](docs/threat-model.md#credentials-in-the-codex-workspace)。
 
 `lc init` 会询问上游地址、凭证、模型 ID、上下文窗口和后端类型。解析后的地址与凭证只写入 `.env`；可共享的结构写入 `registry.json`。
 

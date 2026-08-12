@@ -799,11 +799,57 @@ def codex_env():
     return env
 
 
+def env_in_workspace(cwd=None):
+    """Codex 这次的工作目录里，是不是躺着我们这份 .env。
+
+    判据是「.env 在 CWD 这棵树里」，不是「CWD == ROOT」：用户在仓库的上一层
+    （`cd ~ && ~/airgap-coder/bin/lc code`）启动时，.env 同样在工作区里。反过来
+    在自己的项目目录里跑就不该响——一条永远都响的警告等于没有警告。
+    """
+    if not ENVFILE.is_file():
+        return False
+    try:
+        base = pathlib.Path(cwd or os.getcwd()).resolve()
+    except OSError:                       # CWD 被删掉了，这不是这条检查该报的错
+        return False
+    try:
+        ENVFILE.relative_to(base)
+    except ValueError:
+        return False
+    return True
+
+
+def warn_env_in_workspace(reg):
+    """.env 在工作区里时提醒，但**不阻断**（issue #46）。
+
+    #42 把注入给 Codex 的环境变量收到了最小集，那只关掉了「进程环境」这条读法。
+    `lc code` 是在当前工作目录里启动 Codex 的，而生成的配置是
+    approval_policy = "never"：模型发的 shell 命令不用批准直接执行。工作区里放着
+    .env 的话，一句 `cat .env` 就把 #42 收回去的东西全拿回来了。0600 挡的是别的
+    用户，挡不住以你的身份运行的 Codex。
+
+    不阻断是有意的：在 airgap-coder 仓库里用 Codex 改 airgap-coder 自己是正当
+    用法（docs/codex-workflow.md 就是这么教的），拒绝会挡住它；而加一个放行 flag
+    的人以后会永远带着那个 flag，等于回到只警告但多一步。真正的解法是目录分离，
+    所以警告里给的是这条路。
+    """
+    if not env_in_workspace():
+        return
+    n = len(reg.get("upstreams") or {})
+    warn("这次 Codex 的工作目录里有 .env：%s" % ENVFILE)
+    say("   会话是 approval_policy = \"never\"，模型发的 shell 命令不用批准就执行，"
+        "一句 `cat .env` 就能读走 %d 个上游的地址与凭证。" % n)
+    say("   0600 挡的是别的用户，挡不住以你的身份运行的 Codex。")
+    say("   %s要避开：cd 到你自己的项目目录再跑 lc code——工具目录和工作目录是"
+        "两回事。%s" % (C["d"], C["x"]))
+
+
 def cmd_code(argv):
     reg = load_registry()
     if not gw_alive(reg):
         die("网关没起来，先跑 `lc up`")
     profile = _default_target(reg)
+    warn_env_in_workspace(reg)
     sys.exit(subprocess.call(["codex", "--profile", profile] + list(argv),
                              env=codex_env()))
 
