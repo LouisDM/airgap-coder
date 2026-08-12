@@ -69,15 +69,18 @@ cd ~/your-project
 
 ### 在隔离容器中运行 Codex
 
-先在有网络的中转机上构建固定版本镜像，通过获批流程转移到内网，再连接内网网关：
+先在有网络的中转机上构建固定版本镜像，通过获批流程转移到内网，再连接内网网关。挂载的应当是**你要它改的那个项目目录**，不是 airgap-coder 目录：
 
 ```bash
-docker run --rm -it -v "$PWD:/workspace" \
+docker run --rm -it -v "/path/to/your-project:/workspace" \
   -e GATEWAY_URL=http://gateway.your-intranet.local:4000/v1 \
   -e GATEWAY_KEY=your-gateway-key \
   -e MODEL=your-model \
   airgap-coder:0.1.0 exec "检查这个仓库"
 ```
+
+> [!IMPORTANT]
+> 容器里 Codex 跑的是 `sandbox_mode = "danger-full-access"`——它的 Landlock/seccomp 沙箱在多数容器运行时下不可靠，所以隔离边界是容器本身。这条边界成立的前提是挂载正确：把 airgap-coder 目录（`lc init` 刚往那里写了 `.env`）挂进去，等于把全部上游的地址与凭证放进工作区。entrypoint 检测到工作区里有 `.env` 会警告，但**不会阻断**。详见[工作区中的凭证](docs/threat-model.md#credentials-in-the-codex-workspace)。
 
 跨越网络边界前，请先阅读完整的[离线部署指南](docs/offline-deployment.md)。
 

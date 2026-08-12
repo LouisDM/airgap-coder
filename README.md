@@ -69,15 +69,18 @@ This path does **not** require an `OPENAI_API_KEY`. It uses your self-hosted mod
 
 ### Run Codex from the isolated container
 
-Build the pinned image on a connected staging machine, transfer it through your approved process, then point it at the internal gateway:
+Build the pinned image on a connected staging machine, transfer it through your approved process, then point it at the internal gateway. Mount the project you want Codex to work on — not the airgap-coder directory:
 
 ```bash
-docker run --rm -it -v "$PWD:/workspace" \
+docker run --rm -it -v "/path/to/your-project:/workspace" \
   -e GATEWAY_URL=http://gateway.your-intranet.local:4000/v1 \
   -e GATEWAY_KEY=your-gateway-key \
   -e MODEL=your-model \
   airgap-coder:0.1.0 exec "inspect this repository"
 ```
+
+> [!IMPORTANT]
+> In the container Codex runs with `sandbox_mode = "danger-full-access"`, because its Landlock/seccomp sandbox is unreliable inside many container runtimes; the container itself is the isolation boundary. That boundary only holds if the mount holds. Mounting the airgap-coder directory — where `lc init` just wrote `.env` — puts every upstream endpoint and credential inside the workspace. The entrypoint warns when it finds a `.env` in the workspace, but does not block. See [Credentials in the Codex workspace](docs/threat-model.md#credentials-in-the-codex-workspace).
 
 See the complete [offline deployment guide](docs/offline-deployment.md) before crossing a network boundary.
 

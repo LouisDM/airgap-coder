@@ -93,17 +93,19 @@ cd /path/to/your-project
 
 ## 4. Run the Codex container
 
-Point the container at the internal LiteLLM gateway and mount only the workspace it should access:
+Point the container at the internal LiteLLM gateway and mount only the workspace it should access — the project you want Codex to work on, not the unpacked bundle directory:
 
 ```bash
-docker run --rm -it -v "$PWD:/workspace" \
+docker run --rm -it -v "/path/to/your-project:/workspace" \
   -e GATEWAY_URL=http://gateway.your-intranet.local:4000/v1 \
   -e GATEWAY_KEY=your-gateway-key \
   -e MODEL=your-model \
   airgap-coder:0.1.0 exec "inspect this repository"
 ```
 
-The mount gives Codex access to the current workspace. In `exec` mode the image disables Codex's built-in sandbox because its Landlock/seccomp sandbox is not reliable inside many container runtimes. Treat the container as the isolation boundary: mount only the required workspace, keep sensitive host paths out, and apply your runtime's user, capability, network, and filesystem restrictions.
+In `exec` mode the image disables Codex's built-in sandbox because its Landlock/seccomp sandbox is not reliable inside many container runtimes. Treat the container as the isolation boundary: mount only the required workspace, keep sensitive host paths out, and apply your runtime's user, capability, network, and filesystem restrictions.
+
+That boundary depends entirely on what you mount. Step 3 above ran `lc init` inside the bundle directory, which is where it wrote `.env` — every endpoint, credential, and private header value for every upstream. Mounting the bundle directory therefore hands all of it to a session that executes shell commands without approval, so mount your own project instead. The entrypoint prints a warning when it finds a `.env` in the workspace; it names the path, prints no values, and does not block. See [Credentials in the Codex workspace](threat-model.md#credentials-in-the-codex-workspace).
 
 ## Verify a GitHub release source archive
 

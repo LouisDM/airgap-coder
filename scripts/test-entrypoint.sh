@@ -79,4 +79,55 @@ if [ -e "$WORK/bare/config.toml" ]; then
   exit 1
 fi
 
-echo "✅ entrypoint routes exec-only flags, passes version/help through without gateway config, and validates required variables"
+# issue #50: the container runs Codex with danger-full-access, so a `.env` inside
+# the mounted workspace is readable by one `cat`. Warn on stderr, never block --
+# and, just as importantly, stay quiet when there is no `.env`: a warning that
+# always fires is not a warning (same reasoning as the `lc code` check in #46).
+mkdir -p "$WORK/ws"
+run_in_workspace() {
+  cd "$WORK/ws" || exit 1
+  PATH="$WORK/fakebin:/usr/bin:/bin" \
+  CODEX_HOME="$WORK/codex" \
+  CONTEXT_WINDOW=8192 \
+  MAX_OUTPUT_TOKENS=1024 \
+  GATEWAY_URL=http://gateway.example.local:4000/v1 \
+  GATEWAY_KEY=test-only \
+  MODEL=mock-model \
+  ENTRYPOINT_ARGS="$WORK/args" \
+  /bin/bash "$ROOT/docker/entrypoint.sh" "$@"
+}
+
+cp /dev/null "$WORK/args"
+rm -f "$WORK/ws/.env"
+(run_in_workspace exec "inspect the repository") > "$WORK/clean.log" 2>&1
+if grep -q '\.env' "$WORK/clean.log"; then
+  echo "❌ workspace warning fired without a .env in the workspace" >&2
+  cat "$WORK/clean.log" >&2
+  exit 1
+fi
+
+printf 'KEY_INTRANET=must-not-be-printed\n' > "$WORK/ws/.env"
+cp /dev/null "$WORK/args"
+(run_in_workspace exec "inspect the repository") > "$WORK/warn.log" 2>&1
+grep -q "$WORK/ws/.env" "$WORK/warn.log" || {
+  echo "❌ .env in the workspace did not produce a warning" >&2
+  cat "$WORK/warn.log" >&2
+  exit 1
+}
+grep -q 'danger-full-access' "$WORK/warn.log" || {
+  echo "❌ the warning does not say why it matters (full access session)" >&2
+  exit 1
+}
+# The warning names the file; it must never read or echo its contents.
+if grep -q 'must-not-be-printed' "$WORK/warn.log"; then
+  echo "❌ the warning printed a value out of .env" >&2
+  exit 1
+fi
+# Warn, do not block: codex still runs with the exact same arguments.
+expected="$(printf '%s\n' exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 'inspect the repository')"
+if [ "$(cat "$WORK/args")" != "$expected" ]; then
+  echo "❌ the warning blocked or altered the codex invocation" >&2
+  exit 1
+fi
+
+echo "✅ entrypoint routes exec-only flags, passes version/help through without gateway config, validates required variables, and warns about a .env in the workspace"
