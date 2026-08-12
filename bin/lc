@@ -714,6 +714,33 @@ def _targets(reg, argv, cmd):
     return names
 
 
+def _default_target(reg):
+    """只要「默认上游」这一个名字，解析不了就干净地失败。
+
+    不能复用 `_targets()`：那个函数把 argv 当上游名解析，而 `lc code` 的 argv 是
+    要原样透传给 Codex 的参数（`--sandbox read-only` 之类）。但两条失败路径和
+    措辞必须一致——原来 `cmd_code` 一条都没有，`reg.get("default")` 是 None 时
+    直接进了 subprocess.call 的参数列表，以 `TypeError: expected str ... not
+    NoneType` 的 traceback 收场（issue #47）。这个状态不难到达：`lc rm` 掉最后
+    一个上游会把 default 置回 None，而网关还在跑着。
+
+    第三条是「default 指向一个已经不存在的上游」（手改 registry 之后）。它不会
+    炸，但更坏：Codex 对不存在的 profile 是**静默回落**到默认 model 的，表现成
+    「以为在用 A，其实在用 B」——这个项目在别处一直把这种静默回落当成缺陷。
+    """
+    ups = reg.get("upstreams") or {}
+    if not ups:
+        die("registry.json 里还没有上游，先跑 `lc init`")
+    avail = ", ".join(sorted(ups))
+    name = reg.get("default")
+    if not name:
+        die("没有默认上游，用 `lc use <name>` 选一个。可用: %s" % avail)
+    if name not in ups:
+        die("默认上游 '%s' 不在 registry 里了，用 `lc use <name>` 重新选一个。"
+            "可用: %s" % (name, avail))
+    return name
+
+
 def cmd_test(argv):
     reg = load_registry()
     rc = 0
@@ -776,7 +803,7 @@ def cmd_code(argv):
     reg = load_registry()
     if not gw_alive(reg):
         die("网关没起来，先跑 `lc up`")
-    profile = reg.get("default")
+    profile = _default_target(reg)
     sys.exit(subprocess.call(["codex", "--profile", profile] + list(argv),
                              env=codex_env()))
 
