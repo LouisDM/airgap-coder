@@ -117,6 +117,13 @@ run_any() {  # run_any <日志> <lc 参数...>；不管退出码，只看输出
   NO_COLOR=1 PATH="$WORK/bin:$PATH" "${LC[@]}" "$@" < /dev/null > "$log" 2>&1 || true
 }
 
+run_at() {  # run_at <工作目录> <日志> <lc 参数...>；不管退出码，只看输出
+  local dir="$1" log="$2"; shift 2
+  # lc 的 ROOT 由自身路径推导，和 CWD 无关；改 CWD 改的正是「Codex 在哪跑」。
+  ( cd "$dir" && NO_COLOR=1 PATH="$WORK/bin:$PATH" "${LC[@]}" "$@" < /dev/null ) \
+    > "$log" 2>&1 || true
+}
+
 run_fail() {  # run_fail <日志> <lc 参数...>；命令必须失败
   local log="$1"; shift
   if NO_COLOR=1 PATH="$WORK/bin:$PATH" "${LC[@]}" "$@" < /dev/null > "$log" 2>&1; then
@@ -723,6 +730,46 @@ if [ -s "$CODEX_LOG" ]; then
 else
   pass "默认上游失效时没有拿不存在的 profile 去启动 Codex"
 fi
+
+echo "[6f2] .env 就在 Codex 的工作目录里时给一条警告（issue #46）"
+# #42 收的是「进程环境」那条读法；`lc code` 在 CWD 里启动 Codex，配置又是
+# approval_policy = "never"，工作区里放着 .env 的话一句 `cat .env` 就全拿回去了。
+# 两条都要：该响的时候响，**不该响的时候不响**——一条永远都响的警告等于没有警告，
+# 用户两周就学会无视它。
+cp "$WORK/reg.saved-code" "$REG"      # [6f] 把 default 改坏了，这一节要它是好的
+WARN_MARK="工作目录里有 .env"
+: > "$CODEX_LOG"
+run_at "$SRC" "$WORK/log-code-envwarn" code
+cat "$WORK/log-code-envwarn"
+assert "在工具目录里跑时警告了"        "$WORK/log-code-envwarn" "$WARN_MARK"
+assert "点名了是哪个文件"              "$WORK/log-code-envwarn" "$ENVF"
+assert "说清了暴露面有多大（几个上游）" "$WORK/log-code-envwarn" "2 个上游"
+assert "给出了怎么避开"                "$WORK/log-code-envwarn" "cd 到你自己的项目目录"
+# 警告不许阻断：维护者就在这个仓库里用 Codex 改这个仓库（docs/codex-workflow.md）。
+assert "警告之后照常启动了 Codex"      "$CODEX_LOG" "--profile beta"
+# 警告本身不许把凭证打出来——那就成了它自己在泄漏
+refute "警告里没有 API Key 的值"       "$WORK/log-code-envwarn" "$CANARY_KEY"
+refute "警告里没有 master key 的值"    "$WORK/log-code-envwarn" "$CANARY_MK"
+
+# 用户在自己的项目目录里跑：.env 在别处，Codex 的工作区里没有它，不该响。
+mkdir -p "$WORK/userproj"
+: > "$CODEX_LOG"
+run_at "$WORK/userproj" "$WORK/log-code-nowarn" code
+refute "在自己的项目目录里跑时不警告"  "$WORK/log-code-nowarn" "$WARN_MARK"
+assert "照常启动 Codex"                "$CODEX_LOG" "--profile beta"
+
+# 仓库的上一层：.env 仍然在 Codex 的工作区这棵树里，同样该响。判据是「.env 在
+# CWD 树里」而不是「CWD == ROOT」，这条钉住的就是它。
+: > "$CODEX_LOG"
+run_at "$WORK" "$WORK/log-code-parent" code
+assert "在仓库上一层跑时也警告"        "$WORK/log-code-parent" "$WARN_MARK"
+
+# 没有 .env 时不该响（首次 clone 还没 lc init 的状态）
+mv "$ENVF" "$WORK/env.saved"
+: > "$CODEX_LOG"
+run_at "$SRC" "$WORK/log-code-noenv" code
+refute "没有 .env 时不警告"            "$WORK/log-code-noenv" "$WARN_MARK"
+mv "$WORK/env.saved" "$ENVF"
 
 echo "[6g] 空注册表时 lc code 指向 lc init，和 lc test / lc e2e 一个措辞"
 echo "{\"default\": null, \"gateway_port\": $PORT, \"upstreams\": {}}" > "$REG"

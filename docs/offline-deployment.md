@@ -80,6 +80,15 @@ cd airgap-coder-0.1.0-YYYYMMDD-HHMMSS
 ./bin/lc test
 ```
 
+Run the host-side agent from the project you want to work on, not from the unpacked bundle directory:
+
+```bash
+cd /path/to/your-project
+/path/to/airgap-coder-0.1.0-YYYYMMDD-HHMMSS/bin/lc code
+```
+
+`lc init` writes the site's endpoints and credentials into `.env` inside the bundle directory. `lc code` starts Codex in the current directory under `approval_policy = "never"`, so starting it inside the bundle directory puts that `.env` in the workspace the model can read. `lc code` warns when it detects this; see [Credentials in the Codex workspace](threat-model.md#credentials-in-the-codex-workspace).
+
 `install.sh` verifies every checksum in `SHA256SUMS` before running `docker load`, and stops if any file fails. This detects transfer corruption and interrupted extraction — an unpack that dies partway leaves a directory that looks complete but is not. It is not tamper protection: whoever can modify the bundle can modify `SHA256SUMS` with it. Release-artifact provenance, described at the end of this page, is the control for that. When the bundle includes `registry.json`, `lc init` reuses its reviewed model structure and asks only for the isolated site's endpoint and credential. Without a bundled registry, `lc init` creates the first upstream definition. `lc doctor` then checks the local environment and the configured upstream; `lc test` verifies the gateway path.
 
 ## 4. Run the Codex container

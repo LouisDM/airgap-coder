@@ -51,8 +51,17 @@ npm install -g @openai/codex@0.145.0
 ./bin/lc init    # configure a self-hosted upstream
 ./bin/lc up      # start the LiteLLM gateway
 ./bin/lc test    # validate protocol and tool calling
-./bin/lc code    # start Codex with the selected upstream
 ```
+
+Then start Codex from the project you want to work on. The tool directory and your working directory are different things:
+
+```bash
+cd ~/your-project
+~/airgap-coder/bin/lc code    # start Codex with the selected upstream
+```
+
+> [!IMPORTANT]
+> `lc code` runs Codex in the current directory under `approval_policy = "never"`, so the model can read that directory without asking. Starting it inside the airgap-coder directory puts `.env` — every upstream endpoint and credential — in reach of a single `cat`. `lc code` warns when it detects this, but does not block it, because reviewing airgap-coder itself is a supported workflow. See [Credentials in the Codex workspace](docs/threat-model.md#credentials-in-the-codex-workspace).
 
 `lc init` asks for the upstream URL, credential, model ID, context window, and backend family. Resolved endpoints and credentials are written only to `.env`; the shareable structure is written to `registry.json`.
 
