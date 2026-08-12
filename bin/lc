@@ -1279,7 +1279,14 @@ echo "✅ 镜像已就位。在当前目录接着跑："
 echo "   ./bin/lc init      # __INIT_HINT__"
 echo "   ./bin/lc up        # 起网关"
 echo "   ./bin/lc doctor    # 体检：连通性 + tool calling 真的生效"
-echo "   ./bin/lc code      # 开始用"
+echo
+echo "配好之后，切到你要让 Codex 改的那个项目目录里启动它："
+echo "   cd /path/to/your-project"
+echo "   $(pwd)/bin/lc code"
+echo
+echo "别在这个目录里跑 lc code：上面的 lc init 把全部上游的地址与凭证写进了这里的"
+echo ".env，而 Codex 的会话不用批准就能执行 shell 命令。lc code 检测到这种情况会"
+echo "拒绝启动（确实要改 airgap-coder 自己时加 --allow-workspace-secrets）。"
 echo
 echo "镜像名、版本与 digest 见 MANIFEST.txt。"
 """
