@@ -11,7 +11,8 @@
     lc up / down / status / logs
     lc test [name]       协议层 5 项测试
     lc e2e [name]        端到端测试（真改代码）
-    lc code [args...]    用当前上游启动 Codex
+    lc code [args...]    用当前上游启动 Codex（工作区里有 .env 会拒绝启动，
+                         确实要在那个目录里干活加 --allow-workspace-secrets）
     lc doctor            环境体检
     lc sync              由注册表重新生成 litellm/codex 配置
     lc migrate           把 registry 里遗留的明文 header 值搬进 .env
@@ -819,8 +820,11 @@ def env_in_workspace(cwd=None):
     return True
 
 
-def warn_env_in_workspace(reg):
-    """.env 在工作区里时提醒，但**不阻断**（issue #46）。
+ALLOW_WS_SECRETS = "--allow-workspace-secrets"
+
+
+def guard_env_in_workspace(reg, allow=False):
+    """.env 在 Codex 工作区里时**拒绝启动**，除非显式放行（issue #52）。
 
     #42 把注入给 Codex 的环境变量收到了最小集，那只关掉了「进程环境」这条读法。
     `lc code` 是在当前工作目录里启动 Codex 的，而生成的配置是
@@ -828,10 +832,27 @@ def warn_env_in_workspace(reg):
     .env 的话，一句 `cat .env` 就把 #42 收回去的东西全拿回来了。0600 挡的是别的
     用户，挡不住以你的身份运行的 Codex。
 
-    不阻断是有意的：在 airgap-coder 仓库里用 Codex 改 airgap-coder 自己是正当
-    用法（docs/codex-workflow.md 就是这么教的），拒绝会挡住它；而加一个放行 flag
-    的人以后会永远带着那个 flag，等于回到只警告但多一步。真正的解法是目录分离，
-    所以警告里给的是这条路。
+    #46 当时只警告，理由是「在这个仓库里用 Codex 改 airgap-coder 自己是正当用法，
+    拒绝会挡住它；而放行 flag 加上去之后就永远带着」。这个理由只对**开发
+    airgap-coder 的人**成立，而 #46 / #50 两次踩的都不是这类人：内网的最终用户是
+    照着文档走进来的，撞上时的心智状态是「我在照文档走」而不是「我知道自己在绕过
+    什么」——对他们，一行会被 scroll 过去的黄字和一个必须处理的硬停，差别是决定性
+    的。对开发者「阻断 ≈ 警告」不构成反对，因为他们本来就知道自己在做什么。
+
+    「flag 会退化成静默通道」这个顾虑由两条约束兜住，改这段代码前请先读它们
+    （issue #52 的维护者决策）：
+
+      1. **放行时仍然打印完整警告**。放行不等于安全，只是「你知道你在做什么」。
+         所以就算开发者把 flag 写进 alias 永远带着，他们看到的东西和只警告的
+         年代完全一样，不会更差。
+      2. **不提供环境变量形式的全局开关**。CLI 侧只有 --allow-workspace-secrets
+         这个每次都要显式敲的参数；给了环境变量，`export` 一次就全局静默了，
+         那才是真正的退化。容器侧不得不用环境变量（entrypoint 那边没有命令行可
+         加），但那是被迫，不构成这里的先例。
+
+    真正的根治是目录分离（把 .env 搬出仓库目录），#52 评估后没有采纳：它会破坏
+    「解包 → 目录里什么都有 → 删目录即干净卸载」这个对隔离网交付的承诺。完整的
+    取舍分析在 issue #52 里，将来出现第三条暴露路径时从那份分析重新评估。
     """
     if not env_in_workspace():
         return
@@ -840,8 +861,14 @@ def warn_env_in_workspace(reg):
     say("   会话是 approval_policy = \"never\"，模型发的 shell 命令不用批准就执行，"
         "一句 `cat .env` 就能读走 %d 个上游的地址与凭证。" % n)
     say("   0600 挡的是别的用户，挡不住以你的身份运行的 Codex。")
+    if allow:
+        say("   %s已用 %s 显式放行，本次照常启动——放行不等于安全。%s"
+            % (C["d"], ALLOW_WS_SECRETS, C["x"]))
+        return
     say("   %s要避开：cd 到你自己的项目目录再跑 lc code——工具目录和工作目录是"
         "两回事。%s" % (C["d"], C["x"]))
+    die("已拒绝启动 Codex。确实要在这个目录里干活（比如用 Codex 改 airgap-coder "
+        "自己），加上 %s 显式放行。" % ALLOW_WS_SECRETS)
 
 
 def cmd_code(argv):
@@ -849,7 +876,12 @@ def cmd_code(argv):
     if not gw_alive(reg):
         die("网关没起来，先跑 `lc up`")
     profile = _default_target(reg)
-    warn_env_in_workspace(reg)
+    # 这个 flag 是 lc 自己的，必须从透传给 Codex 的参数里摘掉：Codex 不认识它，
+    # 会以一句 "unexpected argument" 直接退出，用户看到的就成了「按提示放行之后
+    # 反而更坏了」。按精确串摘，不做前缀匹配，免得吃掉 Codex 将来同名前缀的参数。
+    allow = ALLOW_WS_SECRETS in argv
+    argv = [a for a in argv if a != ALLOW_WS_SECRETS]
+    guard_env_in_workspace(reg, allow)
     sys.exit(subprocess.call(["codex", "--profile", profile] + list(argv),
                              env=codex_env()))
 
@@ -1544,7 +1576,8 @@ COMMANDS = [
     ("logs", cmd_logs, "跟踪网关日志"),
     ("test", cmd_test, "协议层 5 项测试: lc test [name...]"),
     ("e2e", cmd_e2e, "端到端测试（真改代码）: lc e2e [name...]"),
-    ("code", cmd_code, "用当前上游启动 Codex: lc code [codex 参数]"),
+    ("code", cmd_code,
+     "用当前上游启动 Codex: lc code [--allow-workspace-secrets] [codex 参数]"),
     ("doctor", cmd_doctor, "环境体检（代理劫持 + 上游 tool calling 探测）"),
     ("sync", cmd_sync, "由 registry.json 重新生成配置"),
     ("migrate", cmd_migrate, "把 registry 里遗留的明文 header 值搬进 .env"),

@@ -61,7 +61,7 @@ cd ~/your-project
 ```
 
 > [!IMPORTANT]
-> `lc code` 在当前目录里启动 Codex，且配置是 `approval_policy = "never"`——模型不用批准就能读这个目录。在 airgap-coder 目录里启动，等于把 `.env`（全部上游的地址与凭证）放进它一句 `cat` 就能拿到的地方。`lc code` 检测到这种情况会警告，但**不会阻断**，因为用 Codex 审查 airgap-coder 自己是被支持的用法。详见[工作区中的凭证](docs/threat-model.md#credentials-in-the-codex-workspace)。
+> `lc code` 在当前目录里启动 Codex，且配置是 `approval_policy = "never"`——模型不用批准就能读这个目录。在 airgap-coder 目录里启动，等于把 `.env`（全部上游的地址与凭证）放进它一句 `cat` 就能拿到的地方。`lc code` 检测到这种情况会**拒绝启动**。确实要让 Codex 在这个目录里干活——唯一的正当场景是改 airgap-coder 自己——加上 `--allow-workspace-secrets` 显式放行，放行之后仍然会打印那条警告。详见[工作区中的凭证](docs/threat-model.md#credentials-in-the-codex-workspace)。
 
 `lc init` 会询问上游地址、凭证、模型 ID、上下文窗口和后端类型。解析后的地址与凭证只写入 `.env`；可共享的结构写入 `registry.json`。
 
@@ -80,7 +80,7 @@ docker run --rm -it -v "/path/to/your-project:/workspace" \
 ```
 
 > [!IMPORTANT]
-> 容器里 Codex 跑的是 `sandbox_mode = "danger-full-access"`——它的 Landlock/seccomp 沙箱在多数容器运行时下不可靠，所以隔离边界是容器本身。这条边界成立的前提是挂载正确：把 airgap-coder 目录（`lc init` 刚往那里写了 `.env`）挂进去，等于把全部上游的地址与凭证放进工作区。entrypoint 检测到工作区里有 `.env` 会警告，但**不会阻断**。详见[工作区中的凭证](docs/threat-model.md#credentials-in-the-codex-workspace)。
+> 容器里 Codex 跑的是 `sandbox_mode = "danger-full-access"`——它的 Landlock/seccomp 沙箱在多数容器运行时下不可靠，所以隔离边界是容器本身。这条边界成立的前提是挂载正确：把 airgap-coder 目录（`lc init` 刚往那里写了 `.env`）挂进去，等于把全部上游的地址与凭证放进工作区。entrypoint 检测到工作区里有 `.env` 会**拒绝启动**：改成挂你自己的项目目录，或者加 `-e AIRGAP_ALLOW_WORKSPACE_SECRETS=1` 显式放行（放行之后仍然会打印那条警告）。详见[工作区中的凭证](docs/threat-model.md#credentials-in-the-codex-workspace)。
 
 跨越网络边界前，请先阅读完整的[离线部署指南](docs/offline-deployment.md)。
 
@@ -104,7 +104,7 @@ docker run --rm -it -v "/path/to/your-project:/workspace" \
 | `lc up`、`lc down`、`lc status`、`lc logs` | 管理网关生命周期 |
 | `lc test [name]` | 执行协议与工具调用检查 |
 | `lc e2e [name]` | 让 Codex 修改测试文件并验证结果 |
-| `lc code [...]` | 使用所选上游启动主机上的 Codex |
+| `lc code [--allow-workspace-secrets] [...]` | 使用所选上游启动主机上的 Codex；`.env` 在工作区里时拒绝启动，除非显式放行 |
 | `lc doctor` | 诊断版本、代理、连接与工具调用 |
 | `lc sync` | 重新生成 LiteLLM 与 Codex 配置 |
 | `lc migrate` | 将旧版明文 HTTP 头值迁移到 `.env` |

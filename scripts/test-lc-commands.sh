@@ -135,6 +135,17 @@ run_fail() {  # run_fail <日志> <lc 参数...>；命令必须失败
   refute "lc $*：失败时没有吐 traceback" "$log" "Traceback (most recent call last)"
 }
 
+run_at_fail() {  # run_at_fail <工作目录> <日志> <lc 参数...>；命令必须失败
+  local dir="$1" log="$2"; shift 2
+  if ( cd "$dir" && NO_COLOR=1 PATH="$WORK/bin:$PATH" "${LC[@]}" "$@" < /dev/null ) \
+      > "$log" 2>&1; then
+    cat "$log"
+    fail "在 $dir 里跑 lc $* 应当以非零退出码失败，实际成功了"
+    return 1
+  fi
+  refute "lc $*：失败时没有吐 traceback" "$log" "Traceback (most recent call last)"
+}
+
 # ── 网关桩：三种形态，都监听 registry 里那个 $PORT ────────────────────────
 # 活着的那个对 /health/liveliness 回 200，让 wait_gw 第一次探活就成功；不起它的话
 # lc up 会老老实实等满默认预算——那不是在测什么，只是在等。
@@ -731,44 +742,117 @@ else
   pass "默认上游失效时没有拿不存在的 profile 去启动 Codex"
 fi
 
-echo "[6f2] .env 就在 Codex 的工作目录里时给一条警告（issue #46）"
+echo "[6f2] .env 就在 Codex 的工作目录里时拒绝启动（issue #46 → #52）"
 # #42 收的是「进程环境」那条读法；`lc code` 在 CWD 里启动 Codex，配置又是
 # approval_policy = "never"，工作区里放着 .env 的话一句 `cat .env` 就全拿回去了。
-# 两条都要：该响的时候响，**不该响的时候不响**——一条永远都响的警告等于没有警告，
-# 用户两周就学会无视它。
+#
+# #46 当时只警告，#52 定成「阻断 + 逃生阀」。三条一起才算钉住：
+#   (1) 工作区里有 .env → 非零退出，且压根没启动 Codex；
+#   (2) 带上逃生阀 → 正常启动，**并且仍然打印警告**；
+#   (3) 工作区里没有 .env → 正常启动，不打印任何警告。
+# (3) 照旧是防误报——一条永远都响的检查等于没有检查。
+# (2) 里「仍然打印警告」那半条最容易烂掉：逃生阀退化成静默开关之后，这个检查对
+# 天天带着 flag 的开发者就完全消失了，而 #52 的决策明确不允许这样。
 cp "$WORK/reg.saved-code" "$REG"      # [6f] 把 default 改坏了，这一节要它是好的
 WARN_MARK="工作目录里有 .env"
-: > "$CODEX_LOG"
-run_at "$SRC" "$WORK/log-code-envwarn" code
-cat "$WORK/log-code-envwarn"
-assert "在工具目录里跑时警告了"        "$WORK/log-code-envwarn" "$WARN_MARK"
-assert "点名了是哪个文件"              "$WORK/log-code-envwarn" "$ENVF"
-assert "说清了暴露面有多大（几个上游）" "$WORK/log-code-envwarn" "2 个上游"
-assert "给出了怎么避开"                "$WORK/log-code-envwarn" "cd 到你自己的项目目录"
-# 警告不许阻断：维护者就在这个仓库里用 Codex 改这个仓库（docs/codex-workflow.md）。
-assert "警告之后照常启动了 Codex"      "$CODEX_LOG" "--profile beta"
-# 警告本身不许把凭证打出来——那就成了它自己在泄漏
-refute "警告里没有 API Key 的值"       "$WORK/log-code-envwarn" "$CANARY_KEY"
-refute "警告里没有 master key 的值"    "$WORK/log-code-envwarn" "$CANARY_MK"
+ALLOW_FLAG="--allow-workspace-secrets"
 
-# 用户在自己的项目目录里跑：.env 在别处，Codex 的工作区里没有它，不该响。
+# (1) 在工具目录里跑：阻断
+: > "$CODEX_LOG"
+if run_at_fail "$SRC" "$WORK/log-code-envblock" code; then
+  cat "$WORK/log-code-envblock"
+  assert "在工具目录里跑时报了警"        "$WORK/log-code-envblock" "$WARN_MARK"
+  assert "点名了是哪个文件"              "$WORK/log-code-envblock" "$ENVF"
+  assert "说清了暴露面有多大（几个上游）" "$WORK/log-code-envblock" "2 个上游"
+  assert "给出了正常的绕开方式"          "$WORK/log-code-envblock" "cd 到你自己的项目目录"
+  assert "明说拒绝启动了"                "$WORK/log-code-envblock" "已拒绝启动 Codex"
+  # 硬停必须同时给出出路，否则用户的第一反应是把这段检查删掉
+  assert "给出了逃生阀"                  "$WORK/log-code-envblock" "$ALLOW_FLAG"
+fi
+if [ -s "$CODEX_LOG" ]; then
+  cat "$CODEX_LOG"
+  fail "拒绝启动之后却还是把 Codex 启起来了"
+else
+  pass "拒绝启动时压根没启动 Codex"
+fi
+# 检查本身不许把凭证打出来——那就成了它自己在泄漏
+refute "提示里没有 API Key 的值"       "$WORK/log-code-envblock" "$CANARY_KEY"
+refute "提示里没有 master key 的值"    "$WORK/log-code-envblock" "$CANARY_MK"
+
+# (2) 逃生阀：正常启动，但警告一个字都不许少
+: > "$CODEX_LOG"
+run_at "$SRC" "$WORK/log-code-allow" code "$ALLOW_FLAG" --sandbox read-only
+cat "$WORK/log-code-allow"
+assert "逃生阀让 Codex 启起来了"        "$CODEX_LOG" "--profile beta"
+assert "逃生阀之后仍然报警"            "$WORK/log-code-allow" "$WARN_MARK"
+assert "仍然点名了文件"                "$WORK/log-code-allow" "$ENVF"
+assert "仍然说清了暴露面"              "$WORK/log-code-allow" "2 个上游"
+assert "说明了这次是显式放行"          "$WORK/log-code-allow" "显式放行"
+refute "放行时不再说「已拒绝启动」"    "$WORK/log-code-allow" "已拒绝启动 Codex"
+refute "放行时也不打印凭证"            "$WORK/log-code-allow" "$CANARY_KEY"
+# 这个 flag 是 lc 自己的，Codex 不认识它。透传下去 Codex 会以 "unexpected
+# argument" 直接退出，用户看到的就成了「按提示放行之后反而更坏了」。
+refute "逃生阀没被透传给 Codex"        "$CODEX_LOG" "$ALLOW_FLAG"
+assert "其它参数照旧透传给 Codex"      "$CODEX_LOG" "--sandbox read-only"
+
+# 变异测试：把阻断改回「只警告」，(1) 必须变红。没有这条，(1) 可能只是碰巧绿的
+# （比如 lc 因为别的原因非零退出，而不是因为这条检查）。
+MUT2="$WORK/mutant-guard"
+rm -rf "$MUT2"; cp -r "$SRC" "$MUT2"
+python3 - "$MUT2/bin/lc" <<'PY'
+import sys
+p = sys.argv[1]
+src = open(p, encoding="utf-8").read()
+old = ('    die("已拒绝启动 Codex。确实要在这个目录里干活（比如用 Codex 改 airgap-coder "\n'
+       '        "自己），加上 %s 显式放行。" % ALLOW_WS_SECRETS)\n')
+if old not in src:
+    # 重构过就直接红，而不是让变异测试静默失效、(1) 从此没人替它把关
+    sys.exit("::error::变异测试找不到注入点，guard_env_in_workspace() 被改过了——请同步更新本处")
+open(p, "w", encoding="utf-8").write(src.replace(old, "    return\n"))
+PY
+: > "$CODEX_LOG"
+( cd "$SRC" && NO_COLOR=1 PATH="$WORK/bin:$PATH" python3 "$MUT2/bin/lc" code < /dev/null ) \
+  > "$WORK/log-code-mut2" 2>&1 || true
+if [ -s "$CODEX_LOG" ]; then
+  pass "变异版本确实放行了，说明 (1) 断的真是这条检查"
+else
+  cat "$WORK/log-code-mut2"
+  fail "变异版本也没启动 Codex——(1) 的非零退出可能来自别的原因，断言是空的"
+fi
+rm -rf "$MUT2"
+
+# (3) 用户在自己的项目目录里跑：.env 在别处，Codex 的工作区里没有它，不该响。
 mkdir -p "$WORK/userproj"
 : > "$CODEX_LOG"
 run_at "$WORK/userproj" "$WORK/log-code-nowarn" code
-refute "在自己的项目目录里跑时不警告"  "$WORK/log-code-nowarn" "$WARN_MARK"
+refute "在自己的项目目录里跑时不报警"  "$WORK/log-code-nowarn" "$WARN_MARK"
 assert "照常启动 Codex"                "$CODEX_LOG" "--profile beta"
 
-# 仓库的上一层：.env 仍然在 Codex 的工作区这棵树里，同样该响。判据是「.env 在
+# 逃生阀在不该响的目录里也不许改变行为：只是被摘掉，不透传、不凭空报警。
+: > "$CODEX_LOG"
+run_at "$WORK/userproj" "$WORK/log-code-allow-clean" code "$ALLOW_FLAG"
+refute "带着逃生阀但没触发时不报警"    "$WORK/log-code-allow-clean" "$WARN_MARK"
+assert "照常启动 Codex"                "$CODEX_LOG" "--profile beta"
+refute "逃生阀同样没被透传给 Codex"    "$CODEX_LOG" "$ALLOW_FLAG"
+
+# 仓库的上一层：.env 仍然在 Codex 的工作区这棵树里，同样该阻断。判据是「.env 在
 # CWD 树里」而不是「CWD == ROOT」，这条钉住的就是它。
 : > "$CODEX_LOG"
-run_at "$WORK" "$WORK/log-code-parent" code
-assert "在仓库上一层跑时也警告"        "$WORK/log-code-parent" "$WARN_MARK"
+if run_at_fail "$WORK" "$WORK/log-code-parent" code; then
+  assert "在仓库上一层跑时也阻断"      "$WORK/log-code-parent" "$WARN_MARK"
+fi
+if [ -s "$CODEX_LOG" ]; then
+  cat "$CODEX_LOG"
+  fail "在仓库上一层被判定为暴露，却还是启动了 Codex"
+else
+  pass "在仓库上一层时也没启动 Codex"
+fi
 
 # 没有 .env 时不该响（首次 clone 还没 lc init 的状态）
 mv "$ENVF" "$WORK/env.saved"
 : > "$CODEX_LOG"
 run_at "$SRC" "$WORK/log-code-noenv" code
-refute "没有 .env 时不警告"            "$WORK/log-code-noenv" "$WARN_MARK"
+refute "没有 .env 时不报警"            "$WORK/log-code-noenv" "$WARN_MARK"
 mv "$WORK/env.saved" "$ENVF"
 
 echo "[6g] 空注册表时 lc code 指向 lc init，和 lc test / lc e2e 一个措辞"
