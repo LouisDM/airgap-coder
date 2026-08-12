@@ -17,6 +17,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Clarified the host-side and isolated-container Codex runtime paths.
 - Aligned offline deployment guidance with default validated-registry inclusion and the `--no-registry` opt-out.
 - Limited the compatibility matrix to reproducible reports with explicit evidence.
+- **Breaking:** `lc code` and the container entrypoint now refuse to start Codex when a `.env` is present in the workspace it will run in, instead of warning and proceeding. Codex runs with `approval_policy = "never"` on the host and `danger-full-access` in the container, so a `.env` in the workspace is readable by one model-issued `cat`; both reported instances of that exposure were on documented happy paths, where a single warning line is easy to scroll past or lose in model output. Pass `--allow-workspace-secrets` on the host or `-e AIRGAP_ALLOW_WORKSPACE_SECRETS=1` in the container to allow it explicitly — reviewing airgap-coder itself remains a supported workflow, and the override still prints the full warning. Anyone who ran `lc code` from the airgap-coder directory now needs either the flag or a `cd` into their own project.
 
 ### Fixed
 

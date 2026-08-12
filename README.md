@@ -61,7 +61,7 @@ cd ~/your-project
 ```
 
 > [!IMPORTANT]
-> `lc code` runs Codex in the current directory under `approval_policy = "never"`, so the model can read that directory without asking. Starting it inside the airgap-coder directory puts `.env` — every upstream endpoint and credential — in reach of a single `cat`. `lc code` warns when it detects this, but does not block it, because reviewing airgap-coder itself is a supported workflow. See [Credentials in the Codex workspace](docs/threat-model.md#credentials-in-the-codex-workspace).
+> `lc code` runs Codex in the current directory under `approval_policy = "never"`, so the model can read that directory without asking. Starting it inside the airgap-coder directory puts `.env` — every upstream endpoint and credential — in reach of a single `cat`. `lc code` **refuses to start** when it detects this. If you really do want Codex to work on that directory — the one case being changing airgap-coder itself — pass `--allow-workspace-secrets`, which starts the session and still prints the warning. See [Credentials in the Codex workspace](docs/threat-model.md#credentials-in-the-codex-workspace).
 
 `lc init` asks for the upstream URL, credential, model ID, context window, and backend family. Resolved endpoints and credentials are written only to `.env`; the shareable structure is written to `registry.json`.
 
@@ -80,7 +80,7 @@ docker run --rm -it -v "/path/to/your-project:/workspace" \
 ```
 
 > [!IMPORTANT]
-> In the container Codex runs with `sandbox_mode = "danger-full-access"`, because its Landlock/seccomp sandbox is unreliable inside many container runtimes; the container itself is the isolation boundary. That boundary only holds if the mount holds. Mounting the airgap-coder directory — where `lc init` just wrote `.env` — puts every upstream endpoint and credential inside the workspace. The entrypoint warns when it finds a `.env` in the workspace, but does not block. See [Credentials in the Codex workspace](docs/threat-model.md#credentials-in-the-codex-workspace).
+> In the container Codex runs with `sandbox_mode = "danger-full-access"`, because its Landlock/seccomp sandbox is unreliable inside many container runtimes; the container itself is the isolation boundary. That boundary only holds if the mount holds. Mounting the airgap-coder directory — where `lc init` just wrote `.env` — puts every upstream endpoint and credential inside the workspace. The entrypoint **refuses to start** when it finds a `.env` in the workspace; mount your own project instead, or pass `-e AIRGAP_ALLOW_WORKSPACE_SECRETS=1` to allow it explicitly (which still prints the warning). See [Credentials in the Codex workspace](docs/threat-model.md#credentials-in-the-codex-workspace).
 
 See the complete [offline deployment guide](docs/offline-deployment.md) before crossing a network boundary.
 
@@ -104,7 +104,7 @@ Read [architecture](docs/architecture.md) for components and trust boundaries.
 | `lc up`, `lc down`, `lc status`, `lc logs` | Manage the gateway |
 | `lc test [name]` | Run protocol and tool-calling checks |
 | `lc e2e [name]` | Ask Codex to edit a fixture and verify the result |
-| `lc code [...]` | Start host-side Codex with the selected upstream |
+| `lc code [--allow-workspace-secrets] [...]` | Start host-side Codex with the selected upstream; refuses when `.env` is in the workspace unless allowed explicitly |
 | `lc doctor` | Diagnose versions, proxy settings, connectivity, and tool calling |
 | `lc sync` | Regenerate LiteLLM and Codex configuration |
 | `lc migrate` | Move legacy plaintext header values into `.env` |

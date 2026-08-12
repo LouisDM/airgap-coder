@@ -87,7 +87,7 @@ cd /path/to/your-project
 /path/to/airgap-coder-0.1.0-YYYYMMDD-HHMMSS/bin/lc code
 ```
 
-`lc init` writes the site's endpoints and credentials into `.env` inside the bundle directory. `lc code` starts Codex in the current directory under `approval_policy = "never"`, so starting it inside the bundle directory puts that `.env` in the workspace the model can read. `lc code` warns when it detects this; see [Credentials in the Codex workspace](threat-model.md#credentials-in-the-codex-workspace).
+`lc init` writes the site's endpoints and credentials into `.env` inside the bundle directory. `lc code` starts Codex in the current directory under `approval_policy = "never"`, so starting it inside the bundle directory puts that `.env` in the workspace the model can read. `lc code` refuses to start when it detects this, and `--allow-workspace-secrets` overrides the refusal for the rare case where the bundle directory really is what you want Codex to work on; see [Credentials in the Codex workspace](threat-model.md#credentials-in-the-codex-workspace).
 
 `install.sh` verifies every checksum in `SHA256SUMS` before running `docker load`, and stops if any file fails. This detects transfer corruption and interrupted extraction — an unpack that dies partway leaves a directory that looks complete but is not. It is not tamper protection: whoever can modify the bundle can modify `SHA256SUMS` with it. Release-artifact provenance, described at the end of this page, is the control for that. When the bundle includes `registry.json`, `lc init` reuses its reviewed model structure and asks only for the isolated site's endpoint and credential. Without a bundled registry, `lc init` creates the first upstream definition. `lc doctor` then checks the local environment and the configured upstream; `lc test` verifies the gateway path.
 
@@ -105,7 +105,7 @@ docker run --rm -it -v "/path/to/your-project:/workspace" \
 
 In `exec` mode the image disables Codex's built-in sandbox because its Landlock/seccomp sandbox is not reliable inside many container runtimes. Treat the container as the isolation boundary: mount only the required workspace, keep sensitive host paths out, and apply your runtime's user, capability, network, and filesystem restrictions.
 
-That boundary depends entirely on what you mount. Step 3 above ran `lc init` inside the bundle directory, which is where it wrote `.env` — every endpoint, credential, and private header value for every upstream. Mounting the bundle directory therefore hands all of it to a session that executes shell commands without approval, so mount your own project instead. The entrypoint prints a warning when it finds a `.env` in the workspace; it names the path, prints no values, and does not block. See [Credentials in the Codex workspace](threat-model.md#credentials-in-the-codex-workspace).
+That boundary depends entirely on what you mount. Step 3 above ran `lc init` inside the bundle directory, which is where it wrote `.env` — every endpoint, credential, and private header value for every upstream. Mounting the bundle directory therefore hands all of it to a session that executes shell commands without approval, so mount your own project instead. The entrypoint refuses to start when it finds a `.env` in the workspace; it names the path, prints no values, and exits non-zero. `-e AIRGAP_ALLOW_WORKSPACE_SECRETS=1` overrides the refusal and still prints the warning. See [Credentials in the Codex workspace](threat-model.md#credentials-in-the-codex-workspace).
 
 ## Verify a GitHub release source archive
 

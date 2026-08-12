@@ -78,6 +78,21 @@ Also compare:
 - generated parameter shape;
 - proxy environment and network path.
 
+## `lc code` refuses to start: a `.env` in the workspace
+
+This is intentional, not a malfunction. `lc code` starts Codex in the current directory under `approval_policy = "never"`, so if the `.env` it uses is inside that directory — or any directory above it — the model can read every upstream endpoint, credential, and private header value with one `cat`. The container path refuses for the same reason under `danger-full-access`.
+
+The normal fix is directory separation, because the tool directory and your working directory are different things:
+
+```bash
+cd ~/your-project
+~/airgap-coder/bin/lc code
+```
+
+For the container, mount the project rather than the airgap-coder checkout or an unpacked bundle: `-v "/path/to/your-project:/workspace"`.
+
+If that directory really is what you want Codex to work on — the one such case being changing airgap-coder itself — allow it explicitly with `lc code --allow-workspace-secrets`, or `-e AIRGAP_ALLOW_WORKSPACE_SECRETS=1` for the container. The override starts the session and still prints the warning. There is deliberately no environment variable for the host flag, so it cannot be exported once and forgotten; see [Credentials in the Codex workspace](threat-model.md#credentials-in-the-codex-workspace).
+
 ## Codex reports missing model metadata
 
 A self-hosted model may not exist in Codex's built-in model catalog. Treat the message as a warning only after confirming that the generated profile has the intended model and context limits and that `lc test` and `lc e2e` pass.
