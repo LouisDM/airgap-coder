@@ -5,8 +5,10 @@
 #   docker pull ghcr.io/berriai/litellm:main-stable@sha256:90d8de0ea6fbb3cad145d1019d00a0149ae400b1e18e2011a60f1988f143f672
 #   ./bin/lc export      # 两个镜像 + 源码 + install.sh + MANIFEST 打成一个包
 #
-# 内网使用（解包后跑 ./install.sh 会自动 docker load）：
-#   docker run -it --rm -v "$PWD:/workspace" \
+# 内网使用（解包后跑 ./install.sh 会自动 docker load）。挂的是你要它改的那个
+# 项目目录，不是 airgap-coder / 离线包目录——那里有 lc init 写的 .env，而下面
+# entrypoint 里 Codex 是 danger-full-access（issue #50）：
+#   docker run -it --rm -v "/path/to/your-project:/workspace" \
 #     -e GATEWAY_URL=http://gateway.your-intranet:4000/v1 \
 #     -e GATEWAY_KEY=xxx \
 #     -e MODEL=your-model-name \

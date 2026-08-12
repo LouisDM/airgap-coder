@@ -87,6 +87,21 @@ def main():
     if readme.count(command_row) != readme_zh.count(command_row):
         failures += fail("bilingual README command tables have different row counts")
 
+    # issue #50: the container runs Codex with danger-full-access, so the mount is
+    # the isolation boundary. A `-v "$PWD:/workspace"` example lands right after
+    # `lc init` wrote `.env` into that same directory, which hands every upstream
+    # credential to the session. Documented examples must name an explicit project
+    # directory instead. The entrypoint's runtime warning is the fallback; this
+    # keeps the example itself from drifting back.
+    mount_pattern = re.compile(r'-v\s+"?\$(?:PWD|\{PWD\})[^"\s]*:/workspace')
+    mount_sources = markdown_files + [ROOT / "docker" / "Dockerfile"]
+    for document in mount_sources:
+        if mount_pattern.search(document.read_text()):
+            failures += fail(
+                "%s mounts the current directory into the container workspace; "
+                "use an explicit project path, because that directory holds .env"
+                % document.relative_to(ROOT))
+
     action_pattern = re.compile(r"^\s*-\s+uses:\s+[^\s]+@([^\s#]+)", re.MULTILINE)
     sha_pattern = re.compile(r"^[0-9a-f]{40}$")
     for workflow in (ROOT / ".github" / "workflows").glob("*.yml"):
