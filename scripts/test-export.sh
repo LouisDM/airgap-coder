@@ -158,6 +158,15 @@ check assert "SHA256SUMS 覆盖包内每一个文件" "MANIFEST 说清校验覆�
 check assert "不是篡改"                      "MANIFEST 说清 sha256 挡的是损坏而不是篡改"
 LIST="$DIR/install.sh"
 check assert "registry.json 已在包里"  "install.sh 的指引说明只需填地址与密钥"
+# issue #52：install.sh 的收尾指引一度是「在当前目录接着跑 ... ./bin/lc code」，
+# 而紧邻的上一行正是 `lc init`——它把全部上游的地址与凭证写进了那个目录的 .env。
+# 这就是 #46 / #50 两次踩坑的 happy path 的源头之一：包里的安装脚本自己在教。
+# 现在 lc code 在这种情况下会拒绝启动，所以这条指引不改就是「按包里的提示走，
+# 走到一半被工具拒绝」，用户的第一反应会是去找怎么关掉那个检查。
+check refute "./bin/lc code"           "install.sh 不再教在包目录里跑 lc code"
+check assert "cd /path/to/your-project" "install.sh 教的是切到自己的项目目录再启动 Codex"
+check assert "拒绝启动"                "install.sh 说清了在包目录里跑会被拒绝，以及为什么"
+check assert "--allow-workspace-secrets" "install.sh 给出了确实要在包目录里干活时的逃生阀"
 test -x "$DIR/install.sh" \
   && echo "  ✅ install.sh 是可执行的" \
   || { echo "  ❌ install.sh 没有可执行位"; fails=$((fails + 1)); }
@@ -333,6 +342,10 @@ if command -v docker >/dev/null 2>&1 &&
     check assert "docker load"     "install.sh 真的 docker load 了镜像"
     check refute "跳过 sha256 校验" "install.sh 做了 sha256 校验（没走跳过分支）"
     check assert "./bin/lc init"   "指引里第一步是 lc init"
+    # 同 [3a] 那几条，但这里看的是**真跑出来的** stdout：$(pwd) 展开过，
+    # 所以这条还顺带钉住指引给的是可直接粘贴的绝对路径（issue #52）。
+    check refute "./bin/lc code"   "跑出来的指引不教在包目录里跑 lc code"
+    check assert "$DIR2/bin/lc code" "跑出来的指引给的是绝对路径，可直接粘贴"
   else
     cat "$OUT/install.log"
     echo "  ❌ install.sh 执行失败"
