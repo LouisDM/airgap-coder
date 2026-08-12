@@ -5,6 +5,7 @@
 #   - `lc up` 的两条失败路径（issue #34 compose 退出码 / issue #35 等待预算）
 #   - 网关端口的唯一真源（issue #40：registry.json 的 gateway_port 必须一路生效到
 #     compose 的端口映射、codex 的 base_url 和 `lc test`，而不是各读各的）
+#   - `lc code` 解析不了默认上游时干净失败（issue #47：None 一路进 subprocess）
 #
 # 第三梯队按 issue 里的分级刻意写得轻：test / e2e 本身就是测试入口，这里不去测
 # 「测试跑得对不对」，只测它们**解析不了目标时干净失败**；logs 只测参数拼装；
@@ -675,6 +676,63 @@ else
   cat "$WORK/log-e2e-env"
   fail "e2e 压根没走到启动 Codex 那一步，这条断言等于没测"
 fi
+
+echo "[6f] lc code 解析不了默认上游时干净失败（issue #47）"
+# 和 [4b] 同一个形态，只是 lc code 走的不是 _targets()——原来 reg["default"] 是
+# None 会一路进 subprocess.call，以 `TypeError: expected str ... not NoneType`
+# 收场。先决条件是**网关活着**（否则被 [6a] 那条提前短路），所以这一节必须放在
+# 网关桩还没停之前。
+cp "$REG" "$WORK/reg.saved-code"
+set_default() {  # set_default <json 字面量>
+  python3 - "$REG" "$1" <<'PY'
+import json, sys
+reg = json.load(open(sys.argv[1], encoding="utf-8"))
+reg["default"] = json.loads(sys.argv[2])
+json.dump(reg, open(sys.argv[1], "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+}
+
+set_default 'null'
+: > "$CODEX_LOG"
+if run_fail "$WORK/log-code-nodef" code; then
+  assert "lc code 说清了没有默认上游"  "$WORK/log-code-nodef" "没有默认上游"
+  assert "并给出怎么选"                "$WORK/log-code-nodef" "lc use <name>"
+  assert "也列出可用的上游"            "$WORK/log-code-nodef" "alpha, beta"
+fi
+# 这条比「非零退出」重要：非零退出靠一段 traceback 也能满足，`TypeError` 不出现
+# 才是这个 issue 的不变量（run_fail 已经查过 Traceback 那一行）。
+refute "lc code 没有 TypeError"        "$WORK/log-code-nodef" "TypeError"
+if [ -s "$CODEX_LOG" ]; then
+  cat "$CODEX_LOG"
+  fail "没有默认上游却还是把 Codex 启起来了"
+else
+  pass "没有默认上游时压根没启动 Codex"
+fi
+
+# default 指向一个已经不存在的上游（手改过 registry）：不会炸，但更坏——Codex 对
+# 不存在的 profile 是静默回落到默认 model 的，表现成「以为在用 A 其实在用 B」。
+set_default '"ghost"'
+: > "$CODEX_LOG"
+if run_fail "$WORK/log-code-stale" code; then
+  assert "lc code 挡下失效的默认上游"  "$WORK/log-code-stale" "默认上游 'ghost' 不在 registry 里"
+  assert "并列出可用的上游"            "$WORK/log-code-stale" "alpha, beta"
+fi
+if [ -s "$CODEX_LOG" ]; then
+  cat "$CODEX_LOG"
+  fail "默认上游已失效，却带着一个不存在的 profile 把 Codex 启起来了"
+else
+  pass "默认上游失效时没有拿不存在的 profile 去启动 Codex"
+fi
+
+echo "[6g] 空注册表时 lc code 指向 lc init，和 lc test / lc e2e 一个措辞"
+echo "{\"default\": null, \"gateway_port\": $PORT, \"upstreams\": {}}" > "$REG"
+: > "$CODEX_LOG"
+if run_fail "$WORK/log-code-empty" code; then
+  assert "lc code 在空注册表时指向 lc init" "$WORK/log-code-empty" "lc init"
+  refute "空注册表时不建议 lc use"          "$WORK/log-code-empty" "lc use <name>"
+fi
+cp "$WORK/reg.saved-code" "$REG"
+
 stop_gw
 
 # ─────────────────────────────────────────────────────────────────────────
