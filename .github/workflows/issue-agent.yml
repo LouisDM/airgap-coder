@@ -1,15 +1,22 @@
 name: Issue Agent
 
-# 每 12 小时自动处理 open issue 与 open PR：
+# 手动触发，处理 open issue 与 open PR：
 #   issue —— 分析、评论、能修的开 PR 并在 CI 全绿后合并
 #   PR    —— review，有问题评论，没问题且 CI 绿则合并
 #            （碰 .github/ 或引入第三方依赖的 PR 一律转人工，见 prompt 里的红线）
-# UTC 04:07 / 16:07 = 香港时间 12:07 / 00:07。
-# 也可以在 Actions 页面手动触发（workflow_dispatch）立即跑一轮。
+#
+#   gh workflow run issue-agent.yml                       # 全部 open issue 与 PR
+#   gh workflow run issue-agent.yml -f dry_run=true       # 只分析评论，不改代码
+#   gh workflow run issue-agent.yml -f issue_numbers=3    # 只处理某个
 
+# 定时触发已停用（2026-08-18）。流水线排空后，连续 6 天每轮只跑 7–10 轮就收工——
+# 没有已批准的 issue、没有 open PR，它看一圈就走。保留 workflow_dispatch：
+# 将来有活时手动跑 `gh workflow run issue-agent.yml` 即可，恢复定时把下面两行
+# 取消注释就行。
+#
+#   schedule:
+#     - cron: "7 4,16 * * *"   # UTC；= 香港 12:07 / 00:07
 on:
-  schedule:
-    - cron: "7 4,16 * * *"
   workflow_dispatch:
     inputs:
       issue_numbers:
