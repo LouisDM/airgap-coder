@@ -18,7 +18,7 @@
 # 搬进内网，之后没有更新路径——内网里发现问题没法 pull 补救。所以稳定性和长期
 # 安全支持优先于新特性，和下面锁死 CODEX_VERSION 是同一个理由。
 # 用 digest 固定：node:24-slim 这个 tag 会随小版本移动，两次构建可能拿到不同镜像。
-FROM node:24-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03
+FROM node:25-slim@sha256:81db02c4b671288a03915da9534dbd54f96d0e7c24d80ccc54f5b36b2e684370
 
 # 版本锁死。Codex 有过单方面移除 wire_api="chat" 的先例，
 # 隔离网环境不应该留自动更新的口子。
